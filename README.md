@@ -132,8 +132,7 @@ install.packages(c(
 
 1. **Clone the repository:**
 ```bash
-git clone https://github.com/yourusername/breast-cancer-classification.git
-cd breast-cancer-classification
+git clone https://github.com/VeasnaRa/Breast-Cancer-Classification.git
 ```
 2. **Run the main analysis:**
 ```r

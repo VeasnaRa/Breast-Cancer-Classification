@@ -1,0 +1,2786 @@
+---
+title: "Breast Cancer Classification Study"
+author: 'DIN Sokheng, RA Veasna'
+date: "2025-11-10"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  fig.width = 7,
+  fig.height = 5,
+  out.width = "80%",
+  fig.align = "center",
+  tidy.opts = list(width.cutoff = 60),
+  tidy = TRUE
+)
+```
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(corrplot)
+library(ggcorrplot)
+library(naniar)
+library(visdat)
+library(rstatix)
+library(DescTools)
+library(car)
+library(limma)
+library(survival)
+library(pheatmap)
+library(diptest) 
+library(forcats)
+library(glmnet)
+library(caTools)
+library(pROC)
+library(gridExtra)
+library(smotefamily)
+library(reshape2)
+```
+
+```{r setup-functions, message=FALSE, warning=FALSE}
+source("function_model_fit.R", local = knitr::knit_global())
+
+cat("Functions loaded successfully: fit_all_models, plot_model_comparison, apply_smote, etc.")
+```
+
+# Classification of Cancer outcome using Genetic and Clinical data
+
+## Introduction
+
+Breast cancer outcome prediction relies on both **clinical variables** (patient, tumor, treatment information) and **genomic features** (mRNA expression).
+This project analyzes a dataset of 1231 patients with 24 clinical variables and 5000 high-variance genes, aiming to:
+
++ Understand clinical variables associated with survival
+
++ Explore gene expression characteristics
+
++ Identify differentially expressed genes
+
++ Detect subgroups of patients (clustering, PCA)
+
++ Evaluate associations between clinical and genomic factors
+
++ Perform survival analysis (Kaplan–Meier)
+
++ Analyse multicollinearity and variable relevance
+
++ Provide a unified understanding of prognostic factors
+
+The main outcome is vital_status: "Alive" vs "Dead".
+
+## Load data
+
+```{r cars , message=FALSE, warning=FALSE}
+load("mrr_bio.Rdata")
+
+# Load dataset
+load("mrr_bio.Rdata")
+
+# Clinical data
+clinical_df <- as.data.frame(clinical_data)
+genex_df    <- as.data.frame(GeneX)
+
+cat("Clinical samples:", nrow(clinical_df), "\n")
+cat("Clinical variables:", ncol(clinical_df), "\n")
+cat("Gene samples:", nrow(genex_df), "\n")
+cat("Genes:", ncol(genex_df), "\n")
+
+# Outcome variable
+table(clinical_df$vital_status)
+
+# Clinical variables: gender
+unique(clinical_data$gender) # unique values
+table(clinical_data$gender)  # frequency
+```
+
+# Clinical data studies
+## Dataset Structure & Variable Types
+```{r message=FALSE, warning=FALSE}
+numeric_vars      <- names(clinical_df)[sapply(clinical_df, is.numeric)]
+categorical_vars  <- names(clinical_df)[sapply(clinical_df, is.character)]
+
+cat("Numeric variables (", length(numeric_vars), "):\n", paste(numeric_vars, collapse=", "), "\n\n")
+cat("Categorical variables (", length(categorical_vars), "):\n", paste(categorical_vars, collapse=", "), "\n\n")
+```
+
+
+## Missing Data Analysis
+```{r missing_data, message=FALSE, warning=FALSE}
+# Calculate missing statistics
+total_missing <- sum(is.na(clinical_df))
+total_cells   <- prod(dim(clinical_df))
+missing_ratio <- total_missing / total_cells
+missing_count <- colSums(is.na(clinical_df))
+missing_pct   <- round(missing_count / nrow(clinical_df) * 100, 2)
+
+missing_table <- data.frame(
+  Column          = names(clinical_df)
+  , Missing_Count = missing_count
+  , Missing_Pct   = missing_pct 
+)
+
+# Filter columns with missing values
+missing_table_filtered <- missing_table[missing_table$Missing_Count > 0, ]
+
+cat("Variables with missing data:\n")
+print(missing_table_filtered[order(-missing_table_filtered$Missing_Count), ])
+
+# Visualize missing data
+ggplot(missing_table
+       , aes(x = reorder(Column, Missing_Count), y = Missing_Count)) +
+  geom_bar(stat = "identity", fill = "#219ebc", color = "#023047", linewidth = 0.3) +
+  geom_text(aes(label = Missing_Count), hjust = -0.2, size = 3, color = "#023047") +
+  coord_flip() +
+  labs(title = "Missing Values Per Variable"
+       , subtitle = "Count of NA values in clinical dataset"
+       , x = "Variable"
+       , y = "Number of Missing Values"
+       , caption = "Data Source: Clinical Dataset") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5, color = "#023047")
+        , plot.subtitle = element_text(hjust = 0.5, color = "#555555")
+        , plot.caption = element_text(face = "italic", color = "#666666")
+        , axis.title = element_text(face = "bold", color = "#023047"))
+```
+
+## Data Cleaning
+```{r data_cleaning, message=FALSE, warning=FALSE}
+# Remove samples with missing vital_status
+cat("Before cleaning:", nrow(clinical_data), "samples\n")
+valid_idx   <- !is.na(clinical_data$vital_status)
+clinical_df <- clinical_data[valid_idx, ]
+GeneX_df    <- GeneX[valid_idx, ]
+
+cat("After removing:", nrow(clinical_df), "samples\n")
+cat("Removed:", sum(!valid_idx), "sample(s)\n\n")
+```
+
+Key clinical predictors:
+
+- age_at_index (continuous)
+
+- initial_weight (continuous)
+
+- ajcc_pathologic_t (tumor stage)
+
+- prior_treatment (yes/no)
+
+- primary_diagnosis (tumor subtype)
+
+- race, gender (demographics)
+
+## Class Balance Check
+```{r class_balance, message=FALSE, warning=FALSE}
+# Visualize class distribution
+ggplot(clinical_df, aes(x = vital_status, fill = vital_status)) +
+  geom_bar(color = "#023047", linewidth = 0.5) +
+  geom_text(stat = "count"
+            , aes(label = after_stat(count))
+            , vjust = -0.5
+            , fontface = "bold"
+            , size = 4) +
+  scale_fill_manual(values = c("Alive" = "#8ecae6", "Dead" = "#e63946")) +
+  labs(title = "Class Distribution: Vital Status"
+       , subtitle = "Target variable for survival prediction (Imbalance ratio: 5.12:1)"
+       , x = "Vital Status"
+       , y = "Count"
+       , caption = "Note: Class imbalance present - consider resampling") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5, color = "#023047")
+        , plot.subtitle = element_text(hjust = 0.5, color = "#555555")
+        , plot.caption = element_text(face = "italic", color = "#666666")
+        , axis.title = element_text(face = "bold", color = "#023047")
+        , legend.position = "none")
+
+cat("Imbalance: 5.12:1 (Alive:Dead)\n")
+```
+
+The outcome variable shows a marked imbalance of 5.12:1 (Alive : Dead), which is expected in clinical studies with right-censoring. This imbalance has no negative impact on exploratory data analysis, but it will require careful handling in later predictive modeling
+
+## Numerical Data Visualizations
+```{r numeric_distributions_full, out.width="100%", message=FALSE, warning=FALSE}
+numeric_vars <- c("age_at_index"
+                  , "age_at_diagnosis"
+                  , "initial_weight"
+                  , "days_to_last_follow_up"
+                  , "days_to_birth")
+
+par(mfrow = c(5, 4), bg = "white", mar = c(4, 4, 3, 1))
+
+# Store statistics values
+summary_stats <- data.frame(
+  Variable           = character()
+  , Mean             = numeric()
+  , Median           = numeric()
+  , SD               = numeric()
+  , Skewness         = numeric()
+  , Outliers         = numeric()
+  , Normality_p      = numeric()
+  , Group_Diff_p     = numeric()
+  , Transform_Needed = character()
+  , stringsAsFactors = FALSE
+)
+
+# Loop over each variables
+for(var in numeric_vars) {
+  cat(sprintf("\n========== %s ==========\n", toupper(var)))
+  
+  # Extract data
+  var_data  <- clinical_df[[var]]
+  var_alive <- var_data[clinical_df$vital_status == "Alive"]
+  var_dead  <- var_data[clinical_df$vital_status == "Dead"]
+  
+  # Remove NA
+  var_data  <- var_data[!is.na(var_data)]
+  var_alive <- var_alive[!is.na(var_alive)]
+  var_dead  <- var_dead[!is.na(var_dead)]
+  
+  # Statistics 
+  var_mean   <- mean(var_data)
+  var_median <- median(var_data)
+  var_sd     <- sd(var_data)
+  var_min    <- min(var_data)
+  var_max    <- max(var_data)
+  
+  # Skewness
+  var_skew <- mean(((var_data - var_mean) / var_sd)^3)
+  
+  # Outliers (IQR method)
+  Q1          <- quantile(var_data, 0.25, na.rm = TRUE)
+  Q3          <- quantile(var_data, 0.75, na.rm = TRUE)
+  IQR_val     <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR_val
+  upper_bound <- Q3 + 1.5 * IQR_val
+  
+  n_outliers  <- sum(var_data < lower_bound | var_data > upper_bound)
+  outlier_pct <- round(n_outliers / length(var_data) * 100, 1)
+  
+  # Normality test (Shapiro-Wilk)
+  if(length(var_data) <= 5000) {
+    shapiro_test <- shapiro.test(var_data)
+    shapiro_p    <- shapiro_test$p.value
+  } else {
+    shapiro_test <- shapiro.test(sample(var_data, 5000))
+    shapiro_p    <- shapiro_test$p.value
+  }
+  
+  # Group difference test (t-test)
+  if(length(var_alive) > 0 & length(var_dead) > 0) {
+    ttest <- t.test(var_alive, var_dead)
+    ttest_p <- ttest$p.value
+  } else {
+    ttest_p <- NA
+  }
+  
+  # Print Statistics 
+  cat(sprintf("Descriptive Statistics:\n"))
+  cat(sprintf("  Mean:       %.2f\n", var_mean))
+  cat(sprintf("  Median:     %.2f\n", var_median))
+  cat(sprintf("  SD:         %.2f\n", var_sd))
+  cat(sprintf("  Range:      [%.2f, %.2f]\n", var_min, var_max))
+  cat(sprintf("  Skewness:   %.3f %s\n"
+              , var_skew
+              , ifelse(abs(var_skew) < 0.5, "(Symmetric)"
+                       , ifelse(var_skew > 0, "(Right-skewed)", "(Left-skewed)"))))
+  
+  cat(sprintf("  Outliers:   %d (%.1f%%)\n", n_outliers, outlier_pct))
+  cat(sprintf("\n"))
+  
+  cat(sprintf("Statistical Tests:\n"))
+  cat(sprintf("  Shapiro-Wilk p-value: %.4e %s\n"
+              , shapiro_p
+              , ifelse(shapiro_p < 0.05, "(NOT normal)", "(Normal)")))
+  
+  if(!is.na(ttest_p)) {
+    cat(sprintf("  T-test (Alive vs Dead): p=%.4e %s\n"
+                , ttest_p
+                , ifelse(ttest_p < 0.05, "*** GROUPS DIFFER", "(No difference)")))
+    cat(sprintf("    Alive: mean=%.2f, sd=%.2f\n"
+                , mean(var_alive), sd(var_alive)))
+    cat(sprintf("    Dead:  mean=%.2f, sd=%.2f\n"
+                , mean(var_dead), sd(var_dead)))
+  }
+  cat(sprintf("\n"))
+  
+  # Transformation 
+  transform_needed <- "None"
+  if(abs(var_skew) > 1.0) {
+    transform_needed <- "Log or sqrt (high skewness)"
+  } else if(outlier_pct > 5) {
+    transform_needed <- "Robust scaling (many outliers)"
+  } else if(shapiro_p < 0.05 & abs(var_skew) > 0.5) {
+    transform_needed <- "Consider log (non-normal + skewed)"
+  }
+  
+  # Store summary
+  summary_stats <- rbind(summary_stats
+                         , data.frame(
+                           Variable           = var
+                           , Mean             = var_mean
+                           , Median           = var_median
+                           , SD               = var_sd
+                           , Skewness         = var_skew
+                           , Outliers         = outlier_pct
+                           , Normality_p      = shapiro_p
+                           , Group_Diff_p     = ifelse(is.na(ttest_p), 1, ttest_p)
+                           , Transform_Needed = transform_needed
+                         ))
+  # Histogram
+  hist(var_data
+       , breaks   = 40
+       , col      = "#8ecae6"
+       , border   = "white"
+       , main     = paste(var, "- Histogram")
+       , sub      = "Distribution with mean (red) and median (orange) lines"
+       , xlab     = var
+       , ylab     = "Frequency"
+       , col.main = "#023047"
+       , col.lab  = "#023047"
+       , col.sub  = "#666666"
+       , cex.main = 1.0
+       , cex.sub  = 0.7
+       , font.sub = 3)
+  
+  # Mean/Median lines
+  abline(v   = var_mean
+         , col = "#e63946"
+         , lwd = 3
+         , lty = 1)
+  
+  abline(v   = var_median
+         , col = "#fb8500"
+         , lwd = 3
+         , lty = 2)
+  
+  # Skewness text
+  text(x      = var_mean
+       , y    = par("usr")[4] * 0.9
+       , labels = sprintf("Skew=%.2f", var_skew)
+       , pos  = 4
+       , col  = "#023047"
+       , cex  = 0.8)
+  
+  legend("topright"
+         , legend = c("Mean", "Median")
+         , col    = c("#e63946", "#fb8500")
+         , lwd    = 3
+         , lty    = c(1, 2)
+         , bty    = "n"
+         , cex    = 0.7)
+  
+  # Density
+  plot(density(var_alive)
+       , col      = "#219ebc"
+       , lwd      = 3
+       , main     = paste(var, "- Density by Status")
+       , sub      = "Comparison of Alive vs Dead patient distributions"
+       , xlab     = var
+       , ylab     = "Density"
+       , col.main = "#023047"
+       , col.lab  = "#023047"
+       , col.sub  = "#666666"
+       , cex.main = 1.0
+       , cex.sub  = 0.7
+       , font.sub = 3)
+  
+  lines(density(var_dead)
+        , col = "#e63946"
+        , lwd = 3)
+  
+  # add group means
+  abline(v   = mean(var_alive)
+         , col = "#219ebc"
+         , lty = 2
+         , lwd = 2)
+  
+  abline(v   = mean(var_dead)
+         , col = "#e63946"
+         , lty = 2
+         , lwd = 2)
+  
+  legend("topright"
+         , legend = c("Alive", "Dead")
+         , col    = c("#219ebc", "#e63946")
+         , lwd    = 3
+         , bty    = "n"
+         , cex    = 0.7)
+  
+  # QQ-Plot
+  qqnorm(var_data
+         , main     = paste(var, "- Q-Q Plot")
+         , sub      = "Normality assessment: points on line = normal distribution"
+         , pch      = 19
+         , cex      = 0.5
+         , col      = "#8ecae6"
+         , col.main = "#023047"
+         , col.lab  = "#023047"
+         , col.sub  = "#666666"
+         , cex.main = 1.0
+         , cex.sub  = 0.7
+         , font.sub = 3)
+  
+  qqline(var_data
+         , col = "#e63946"
+         , lwd = 3)
+  
+  # Normality
+  text(x      = par("usr")[1]
+       , y    = par("usr")[4]
+       , labels = sprintf("Shapiro p=%.2e\n%s"
+                          , shapiro_p
+                          , ifelse(shapiro_p < 0.05, "NON-normal", "Normal"))
+       , pos  = 4
+       , col  = ifelse(shapiro_p < 0.05, "#e63946", "#219ebc")
+       , cex  = 0.8
+       , font = 2)
+  
+  # Outliers
+  boxplot(var_data ~ clinical_df$vital_status[!is.na(clinical_df[[var]])]
+          , col       = c("#8ecae6", "#ffb703")
+          , names     = c("Alive", "Dead")
+          , main      = paste(var, "- Boxplot by Vital Status")
+          , sub       = "Group comparison with outliers shown"
+          , xlab      = "Vital Status"
+          , ylab      = var
+          , border    = c("#219ebc", "#fb8500")
+          , col.main  = "#023047"
+          , col.lab   = "#023047"
+          , col.sub   = "#666666"
+          , lwd       = 1.5
+          , cex.main  = 1.0
+          , cex.sub   = 0.7
+          , font.sub  = 3
+          , outline   = TRUE)  # Show outliers
+  
+  text(x      = 1
+       , y    = par("usr")[3]
+       , labels = sprintf("n=%d", length(var_alive))
+       , pos  = 3
+       , cex  = 0.7)
+  
+  text(x      = 2
+       , y    = par("usr")[3]
+       , labels = sprintf("n=%d", length(var_dead))
+       , pos  = 3
+       , cex  = 0.7)
+  
+  # Add p-value labels
+  if(!is.na(ttest_p)) {
+    text(x      = 1.5
+         , y    = par("usr")[4]
+         , labels = sprintf("p=%.3f %s"
+                            , ttest_p
+                            , ifelse(ttest_p < 0.05, "***", ""))
+         , pos  = 1
+         , col  = ifelse(ttest_p < 0.05, "#e63946", "#023047")
+         , cex  = 0.8
+         , font = 2)
+  }
+}
+
+par(mfrow = c(1, 1))
+```
+### **Conclusion of Numerical Variable Analysis**
+
+- **AGE_AT_INDEX**
+  - Symmetric distribution, no outliers.
+  - Not normally distributed (Shapiro p < 1e-6).
+  - Significant group difference (p = 0.0069).
+  - *Dead patients are older (60.9 vs 57.8).*
+
+- **AGE_AT_DIAGNOSIS**
+  - Symmetric, no outliers.
+  - Not normal.
+  - Significant difference (p = 0.0064).
+  - *Dead patients were diagnosed at an older age.*
+
+- **INITIAL_WEIGHT**
+  - Strong right skew; many outliers (~6%).
+  - Not normal.
+  - No significant difference (p = 0.081).
+  - *Weight does not differ between Alive/Dead groups.*
+
+- **DAYS_TO_LAST_FOLLOW_UP**
+  - Strong right-skewed distribution with outliers.
+  - Not normal.
+  - Significant difference (p = 6.6e-05).
+  - *Dead patients show longer follow-up times (expected due to event vs censoring).*
+
+- **DAYS_TO_BIRTH**
+  - Symmetric distribution, no outliers.
+  - Not normal.
+  - Significant difference (p = 0.0107).
+  - *Reflects age differences – Dead patients are older.*
+
+
+## Numerical Variables - Group Comparison Tests
+```{r numerical_comparison_tests, fig.width=10, fig.height=6}
+clinical_df <- as.data.frame(clinical_df)
+
+# Convert target
+clinical_df$Y <- factor(clinical_df$vital_status, levels = c("Alive", "Dead"))
+
+num_vars <- c("age_at_index"
+              , "age_at_diagnosis"
+              , "initial_weight"
+              , "days_to_last_follow_up"
+              , "days_to_birth")
+
+# Storage for results
+test_results <- data.frame(
+  Variable      = character()
+  , Test        = character()
+  , Statistic   = numeric()
+  , P_value     = numeric()
+  , Effect_Size = numeric()
+  , Correlation = numeric()
+  , stringsAsFactors = FALSE
+)
+
+# Test each variable
+for(var in num_vars) {
+  
+  valid_idx <- !is.na(clinical_df[[var]]) & !is.na(clinical_df$Y)
+  df_test   <- clinical_df[valid_idx, c("Y", var)]
+  
+  # Skip if insufficient data
+  if(nrow(df_test) < 10 || length(unique(df_test$Y)) < 2) next
+  
+  # --- Check skewness ---
+  alive_vals <- df_test[df_test$Y == "Alive", var]
+  dead_vals  <- df_test[df_test$Y == "Dead", var]
+  
+  skew_alive <- abs(mean(alive_vals) - median(alive_vals)) / IQR(alive_vals)
+  skew_dead  <- abs(mean(dead_vals) - median(dead_vals)) / IQR(dead_vals)
+  
+  is_normal <- (skew_alive < 0.2 & skew_dead < 0.2)
+  
+  # --- Choose test ---
+  if(is_normal) {
+    # T-test
+    test_res <- t.test(df_test[[var]] ~ df_test$Y, var.equal = TRUE)
+    
+    test_name <- "t-test"
+    stat_val  <- test_res$statistic
+    p_val     <- test_res$p.value
+    
+    # Cohen's d
+    effect <- cohens_d(df_test, as.formula(paste(var, "~ Y")))$effsize
+    
+  } else {
+    # Wilcoxon test
+    test_res <- wilcox.test(df_test[[var]] ~ df_test$Y)
+    
+    test_name <- "Wilcoxon"
+    stat_val  <- test_res$statistic
+    p_val     <- test_res$p.value
+    
+    # Rank-biserial
+    effect <- wilcox_effsize(df_test, as.formula(paste(var, "~ Y")))$effsize
+  }
+  
+  # Point-biserial correlation
+  cor_val <- cor(df_test[[var]], as.numeric(df_test$Y) - 1)
+  
+  # Store results
+  test_results <- rbind(test_results
+                        , data.frame(Variable      = var
+                                     , Test        = test_name
+                                     , Statistic   = round(stat_val, 2)
+                                     , P_value     = p_val
+                                     , Effect_Size = round(effect, 3)
+                                     , Correlation = round(cor_val, 3)))
+  
+  # --- Visualization ---
+  p <- ggplot(df_test, aes(x = Y, y = .data[[var]], fill = Y)) +
+    geom_boxplot(alpha = 0.7, outlier.shape = 19, outlier.size = 1) +
+    scale_fill_manual(values = c("Alive" = "#8ecae6", "Dead" = "#ffb703")) +
+    labs(title = paste(var, "-", test_name)
+         , subtitle = sprintf("p=%.4f, Effect=%.3f, r=%.3f", p_val, effect, cor_val)
+         , x = "Vital Status"
+         , y = var
+         , caption = ifelse(p_val < 0.05, "Statistically significant difference", "No significant difference")) +
+    theme_minimal(base_size = 12) +
+    theme(legend.position = "none"
+          , plot.title = element_text(face = "bold", hjust = 0.5, color = "#023047")
+          , plot.subtitle = element_text(hjust = 0.5, color = ifelse(p_val < 0.05, "#e63946", "#023047"))
+          , plot.caption = element_text(face = "italic", color = "#666666")
+          , axis.title = element_text(face = "bold", color = "#023047"))
+  
+  print(p)
+}
+
+# --- FDR correction ---
+test_results$P_adj <- p.adjust(test_results$P_value, method = "fdr")
+
+for(i in 1:nrow(test_results)) {
+  row <- test_results[i, ]
+  
+  sig <- ifelse(row$P_adj < 0.001, "***"
+                , ifelse(row$P_adj < 0.01, "**"
+                         , ifelse(row$P_adj < 0.05, "*", "")))
+  
+  cat(sprintf("%-25s %-10s %10.2f %10.4f %10.4f %10.3f %10.3f %s\n"
+              , row$Variable
+              , row$Test
+              , row$Statistic
+              , row$P_value
+              , row$P_adj
+              , row$Effect_Size
+              , row$Correlation
+              , sig))
+}
+
+```
+According to the data analysis and the implementation of statistical tests on the clinical dataset. We can observe that columns such as **age at diagnosis, age at index, and day to birth** are the same information, which we can drop or exclude for variable selection by keeping only age at index. In addition, **initial weight** columns are also not significant for vital status target. 
+
+## Clinical Correlation Matrix
+```{r clinical_correlation, fig.width=8, fig.height=6}
+# Convert target to numeric
+clinical_base <- as.data.frame(clinical_df)
+clinical_base$vital_status_bin <- ifelse(clinical_base$vital_status == "Dead", 1, 0)
+
+# Get numeric variables
+clinic_num_cols <- names(clinical_base)[sapply(clinical_base, is.numeric)]
+numeric_df      <- clinical_base[, clinic_num_cols]
+
+# Compute correlation
+corr_matrix <- cor(numeric_df, use = "complete.obs")
+
+# Plot
+ggcorrplot(corr_matrix
+           , hc.order = TRUE
+           , lab      = TRUE
+           , lab_size = 2.5
+           , method   = "circle"
+           , type     = "lower"
+           , colors   = c("#4361ee", "#f8f9fa", "#e63946")
+           , title    = "Correlation Matrix - Clinical Numeric Variables"
+           , ggtheme  = theme_minimal() +
+               theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold", color = "#023047")
+                     , plot.subtitle = element_text(hjust = 0.5, color = "#555555")
+                     , plot.caption = element_text(face = "italic", color = "#666666")
+                     , axis.text = element_text(color = "#023047"))) +
+  labs(subtitle = "Pearson correlation coefficients"
+       , caption = "Method: Complete observations with hierarchical clustering")
+```
+From above correlation matrix, we can interprete that
+
+- **age_at_index**, **age_at_diagnosis**, and **days_to_birth**  
+  - Extremely high correlations (|r| ~= 0.99).  
+  - These three variables encode the **same underlying information (patient age)**.  
+  - Keep only one **(age_at_index)** for modeling to avoid multicollinearity.
+
+- **days_to_last_follow_up**
+  - Weak correlations with all other variables (|r| < 0.20).  
+  - Slight positive correlation with vital_status_bin (r ~= 0.13), expected because **Dead patients have actual event times**, while Alive patients are censored earlier.
+
+- **initial_weight**
+  - Very weak correlations with every clinical variable and with survival (|r| < 0.10).  
+  -Not a predictive feature.
+
+- **vital_status_bin**
+  - Correlates weakly with every numeric variable (|r| < 0.13).  
+  - No strong linear relationship; survival differences detected by group tests are **small effect sizes**, not strong correlations.
+
+The numerical variables reveal one clear multicollinearity block: *age_at_index*, *age_at_diagnosis*, and *days_to_birth* all measure the same underlying factor (patient age) and only one should be kept. Other variables show only weak correlations with survival. *Days_to_last_follow_up* has a small association due to censoring differences, while *initial_weight* shows negligible relevance and can be excluded.
+
+
+## VIF Analysis for Clinical Variables
+```{r vif_clinical}
+# Prepare clinical data
+clinical_vif <- data.frame(
+  age_at_index           = clinical_df$age_at_index
+  , age_at_diagnosis     = clinical_df$age_at_diagnosis
+  , initial_weight       = clinical_df$initial_weight
+  , days_to_last_follow_up = clinical_df$days_to_last_follow_up
+  , days_to_birth        = clinical_df$days_to_birth
+  , vital_status_bin     = ifelse(clinical_df$vital_status == "Dead", 1, 0)
+)
+
+# Remove NA
+clinical_vif <- na.omit(clinical_vif)
+
+cat("After removing NA:", nrow(clinical_vif), "\n\n")
+
+# Fit model
+full_model <- glm(vital_status_bin ~ age_at_index + age_at_diagnosis + 
+                    initial_weight + days_to_last_follow_up + days_to_birth
+                  , data   = clinical_vif
+                  , family = binomial)
+
+# Calculate VIF
+vif_values <- vif(full_model)
+
+cat("VIF Results:\n")
+print(vif_values)
+
+cat("\n=== INTERPRETATION ===\n")
+cat("VIF < 5:  No multicollinearity\n")
+cat("VIF 5-10: Moderate multicollinearity (monitor)\n")
+cat("VIF > 10: High multicollinearity (REMOVE variable)\n\n")
+
+# Flag problematic variables
+high_vif <- names(vif_values)[vif_values > 10]
+mod_vif  <- names(vif_values)[vif_values >= 5 & vif_values <= 10]
+
+if(length(high_vif) > 0) {
+  cat("HIGH VIF (>10) - REMOVE:\n")
+  for(var in high_vif) {
+    cat(sprintf("   %s: VIF = %.2f\n", var, vif_values[var]))
+  }
+  cat("\n")
+}
+
+if(length(mod_vif) > 0) {
+  cat(" MODERATE VIF (5-10) - MONITOR:\n")
+  for(var in mod_vif) {
+    cat(sprintf("   %s: VIF = %.2f\n", var, vif_values[var]))
+  }
+  cat("\n")
+}
+
+# Convert into data frame
+vif_df <- data.frame(
+  Variable = names(vif_values),
+  VIF = as.numeric(vif_values)
+)
+
+# Threshold for high multicollinearity (commonly VIF > 5 or > 10)
+threshold <- 5
+
+# Classify variables
+vif_df$Group <- ifelse(vif_df$VIF > threshold,
+                       "High Multicollinearity (Remove)",
+                       "No Multicollinearity")
+
+# Plot bar graph
+ggplot(vif_df, aes(x = reorder(Variable, VIF), y = VIF, fill = Group)) +
+  geom_bar(stat = "identity") +
+  coord_flip() + 
+  scale_fill_manual(values = c(
+    "No Multicollinearity" = "steelblue",
+    "High Multicollinearity (Remove)" = "tomato"
+  )) +
+  labs(title = "VIF Results",
+       x = "Variables",
+       y = "VIF Score",
+       fill = "Category") +
+  theme_minimal(base_size = 14)
+```
+From VIF, it shows extreme multicollinearity among the age variables **(age_at_index, age_at_diagnosis, days_to_birth)**, meaning they all represent the same information and only should be kept. The over variable **(initial_weight, days_to_last_follow_up)** have VIF~=1 and pose no multicollinearity issue.
+
+## PCA Analysis on Clinical Variables
+```{r pca_clinical, fig.width=12, fig.height=10}
+clinical_pca <- data.frame(
+  age_at_index           = clinical_df$age_at_index
+  , age_at_diagnosis     = clinical_df$age_at_diagnosis
+  , initial_weight       = clinical_df$initial_weight
+  , days_to_last_follow_up = clinical_df$days_to_last_follow_up
+  , days_to_birth        = clinical_df$days_to_birth
+)
+
+clinical_pca$vital_status <- clinical_df$vital_status
+
+# Remove NA
+clinical_pca <- na.omit(clinical_pca)
+predictors <- clinical_pca[, 1:5]
+
+# Run PCA (scaled)
+pca_result <- prcomp(predictors, scale. = TRUE, center = TRUE)
+
+# Variance explained
+var_exp     <- summary(pca_result)$importance[2, ]
+var_cum     <- summary(pca_result)$importance[3, ]
+
+cat("Variance Explained:\n")
+for(i in 1:5) {
+  cat(sprintf("  PC%d: %.1f%% (Cumulative: %.1f%%)\n"
+              , i
+              , var_exp[i] * 100
+              , var_cum[i] * 100))
+}
+cat("\n")
+
+cat("Variable Loadings on PC1 and PC2:\n")
+loadings <- pca_result$rotation[, 1:2]
+print(round(loadings, 3))
+cat("\n")
+
+# Interpretation
+cat("=== INTERPRETATION ===\n")
+cat("PC1 captures", round(var_exp[1] * 100, 1), "% variance\n")
+cat("  - High loadings:", names(sort(abs(loadings[, 1]), decreasing = TRUE)[1:2]), "\n")
+
+cat("PC2 captures", round(var_exp[2] * 100, 1), "% variance\n")
+cat("  - High loadings:", names(sort(abs(loadings[, 2]), decreasing = TRUE)[1:2]), "\n\n")
+
+par(mfrow = c(2, 2), bg = "white", mar = c(4, 4, 3, 2))
+
+# 1. Scree Plot
+barplot(var_exp * 100
+        , names.arg = paste0("PC", 1:5)
+        , col       = "#8ecae6"
+        , border    = "white"
+        , xlab      = "Principal Component"
+        , ylab      = "Variance Explained (%)"
+        , main      = "Scree Plot - Clinical Variables"
+        , sub       = "Eigenvalue decomposition showing variance per PC"
+        , col.main  = "#023047"
+        , col.lab   = "#023047"
+        , col.sub   = "#666666"
+        , cex.sub   = 0.7
+        , font.sub  = 3
+        , las       = 1)
+
+abline(h   = 20
+       , col = "#e63946"
+       , lty = 2
+       , lwd = 2)
+
+# 2. Cumulative Variance
+plot(1:5
+     , var_cum * 100
+     , type     = "b"
+     , pch      = 19
+     , col      = "#219ebc"
+     , lwd      = 3
+     , xlab     = "Principal Component"
+     , ylab     = "Cumulative Variance (%)"
+     , main     = "Cumulative Variance Explained"
+     , sub      = "Total variance captured by first n components"
+     , col.main = "#023047"
+     , col.lab  = "#023047"
+     , col.sub  = "#666666"
+     , cex.sub  = 0.7
+     , font.sub = 3
+     , las      = 1)
+
+abline(h   = 80
+       , col = "#fb8500"
+       , lty = 2
+       , lwd = 2)
+
+text(x = 3, y = 85, labels = "80% threshold", col = "#fb8500", cex = 0.8)
+
+# 3. PC1 vs PC2 (colored by vital status)
+plot(pca_result$x[, 1]
+     , pca_result$x[, 2]
+     , pch      = 19
+     , cex      = 0.6
+     , col      = ifelse(clinical_pca$vital_status == "Dead"
+                         , "#e63946", "#8ecae6")
+     , xlab     = paste0("PC1 (", round(var_exp[1] * 100, 1), "%)")
+     , ylab     = paste0("PC2 (", round(var_exp[2] * 100, 1), "%)")
+     , main     = "PCA: Samples by Vital Status"
+     , sub      = "Patient projection onto first two principal components"
+     , col.main = "#023047"
+     , col.lab  = "#023047"
+     , col.sub  = "#666666"
+     , cex.sub  = 0.7
+     , font.sub = 3)
+
+legend("topright"
+       , legend = c("Alive", "Dead")
+       , col    = c("#8ecae6", "#e63946")
+       , pch    = 19
+       , bty    = "n"
+       , cex    = 0.8)
+
+# 4. Biplot (variables + samples)
+biplot(pca_result
+       , choices   = 1:2
+       , scale     = 0
+       , col       = c("#8ecae6", "#e63946")
+       , cex       = c(0.5, 0.8)
+       , main      = "Biplot: Variables & Samples"
+       , col.main  = "#023047"
+       , arrow.len = 0.1)
+
+par(mfrow = c(1, 1))
+```
+
+## Drop Redundant Variables Based on VIF + PCA
+```{r drop_redundant_variables}
+drop_vars <- c("age_at_diagnosis", "days_to_birth")
+
+# KEEP
+keep_vars <- c("age_at_index"
+               , "initial_weight"
+               , "days_to_last_follow_up")
+
+
+# Create reduced set
+clinical_reduced <- data.frame(
+  age_at_index           = clinical_df$age_at_index
+  , initial_weight       = clinical_df$initial_weight
+  , days_to_last_follow_up = clinical_df$days_to_last_follow_up
+  , vital_status_bin     = ifelse(clinical_df$vital_status == "Dead", 1, 0)
+)
+
+clinical_reduced <- na.omit(clinical_reduced)
+
+# Fit model
+reduced_model <- glm(vital_status_bin ~ age_at_index + initial_weight + 
+                       days_to_last_follow_up
+                     , data   = clinical_reduced
+                     , family = binomial)
+
+# Calculate VIF
+vif_reduced <- car::vif(reduced_model)
+
+cat("VIF Results (Reduced Model):\n")
+print(vif_reduced)
+```
+After reducing some redundant variabels, we can see that the VIF is now better no more multicollinearity.
+
+## Categorical Variables Analysis
+```{r categorical_analysis}
+clinical_df <- as.data.frame(clinical_df)
+
+exclude_cols <- c("bcr_patient_barcode"
+                  , "primary_site"
+                  , "days_to_birth"
+                  , "age_at_diagnosis"
+                  , "sites_of_involvement"
+                  , "disease_type"
+                  , "vital_status"
+                  , "Y")
+
+# Select cols
+cat_cols <- names(clinical_df)[sapply(clinical_df, function(x) 
+  is.character(x) | is.factor(x))]
+
+cat_cols <- setdiff(cat_cols, exclude_cols)
+
+cat("Categorical variables:", length(cat_cols), "\n")
+cat(paste(cat_cols, collapse = ", "), "\n\n")
+
+# Clean and prepare
+categorical_df <- clinical_df[, cat_cols, drop = FALSE]
+
+# Convert to character
+categorical_df <- data.frame(lapply(categorical_df, as.character)
+                              , stringsAsFactors = FALSE)
+
+# Mark missing values
+missing_markers <- c("not reported", "not applicable", "unknown", "NA", "")
+
+for(var in names(categorical_df)) {
+  categorical_df[[var]][categorical_df[[var]] %in% missing_markers] <- NA
+}
+
+# Group categories with < 10 samples
+for(var in names(categorical_df)) {
+  
+  categorical_df[[var]] <- as.factor(categorical_df[[var]])
+  categorical_df[[var]] <- fct_lump_min(categorical_df[[var]]
+                                         , min = 10
+                                         , other_level = "Other")
+  categorical_df[[var]] <- droplevels(categorical_df[[var]])
+  
+  cat(sprintf("%s: %d levels after grouping\n"
+              , var
+              , nlevels(categorical_df[[var]])))
+}
+```
+
+## Statistical Tests and Visualization
+```{r categorical_tests, fig.width=10, fig.height=6}
+# Add outcome variable to categorical_df
+categorical_df$Y <- factor(clinical_df$vital_status)
+
+results <- list()
+
+for (var in setdiff(names(categorical_df), "Y")) {
+  
+  x <- categorical_df[[var]]
+  y <- categorical_df$Y
+  # Skip constants
+  if (n_distinct(x) <= 1) {
+    results[[var]] <- data.frame(
+      Test="Constant variable", P_value=NA, Statistic=NA, Cramers_V=NA,
+      Note="Skipped (constant)", stringsAsFactors=FALSE
+    )
+    next
+  }
+  
+  # Build table
+  tbl <- table(x, y)
+  
+  if (nrow(tbl) < 2 || ncol(tbl) < 2) {
+    results[[var]] <- data.frame(
+      Test="Too few levels", P_value=NA, Statistic=NA, Cramers_V=NA,
+      Note="Not enough levels", stringsAsFactors=FALSE
+    )
+    next
+  }
+  
+  # Expected counts
+  expected <- outer(rowSums(tbl), colSums(tbl)) / sum(tbl)
+  
+  # Choose appropriate test
+  if (nrow(tbl) == 2 && ncol(tbl) == 2) {
+    
+    # Fisher for 2x2
+    test <- fisher.test(tbl)
+    test_name <- "Fisher Exact (2x2)"
+    stat_val <- NA
+    
+  } else if (all(expected >= 5)) {
+    
+    # Standard Chi-square
+    test <- chisq.test(tbl, correct = FALSE)
+    test_name <- "Chi-square"
+    stat_val <- test$statistic
+    
+  } else {
+    
+    # Monte Carlo Chi-square for sparse large contingency tables
+    test <- chisq.test(tbl, simulate.p.value = TRUE, B = 10000)
+    test_name <- "Chi-square (MC simulation)"
+    stat_val <- test$statistic
+  }
+
+  pval <- test$p.value
+  
+  # Cramér’s V
+  chi2 <- sum((tbl - expected)^2 / expected)
+  k <- min(nrow(tbl), ncol(tbl))
+  cramers_v <- sqrt(chi2 / (sum(tbl) * (k - 1)))
+  
+  results[[var]] <- data.frame(
+    Test=test_name,
+    Statistic=stat_val,
+    P_value=pval,
+    Cramers_V=round(cramers_v, 4),
+    Note=ifelse(pval < 0.05, "Significant", "Not significant"),
+    stringsAsFactors=FALSE
+  )
+}
+  
+results_df <- do.call(rbind, results)
+results_df$Variable <- rownames(results_df)
+results_df <- results_df[, c("Variable","Test","Statistic","P_value","Cramers_V","Note")]
+print(results_df)
+
+
+# Plot 1: Bar plot with P-value
+ggplot(results_df, aes(x = reorder(Variable, P_value), y = P_value)) +
+  geom_bar(stat = "identity", fill = "#8ecae6", color = "#023047", linewidth = 0.3) +
+  geom_text(aes(label = sprintf("%.3f", P_value)), 
+            hjust = -0.2, size = 3, color = "#023047") +
+  coord_flip() +
+  labs(title = "P-values for Categorical Associations",
+       subtitle = "Chi-square / Fisher tests across categorical variables",
+       x = "Variable",
+       y = "P-value",
+       caption = "Statistical comparison of categorical variables vs Vital Status") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5, color = "#023047"),
+        plot.subtitle = element_text(hjust = 0.5, color = "#555555"),
+        plot.caption = element_text(face = "italic", color = "#666666"),
+        axis.title = element_text(face = "bold", color = "#023047"))
+
+
+# Plot 1: Cramér’s V Strength Plot
+ggplot(results_df, aes(x = reorder(Variable, Cramers_V), y = Cramers_V)) +
+  geom_bar(stat = "identity", fill = "#ffb703", color = "#9a6a00", linewidth = 0.3) +
+  geom_text(aes(label = sprintf("%.2f", Cramers_V)),
+            hjust = -0.2, size = 3, color = "#9a6a00") +
+  coord_flip() +
+  labs(title = "Effect Size (Cramér’s V) For Categorical Associations",
+       subtitle = "Higher values indicate stronger association with Vital Status",
+       x = "Variable",
+       y = "Cramér’s V") +
+  theme_minimal(base_size = 12)
+
+# Plot 3: Significance Highlight Plot
+ggplot(results_df, aes(x = reorder(Variable, P_value), 
+                       y = -log10(P_value),
+                       fill = Note)) +
+  geom_bar(stat = "identity", color = "#023047") +
+  coord_flip() +
+  scale_fill_manual(values = c("Significant" = "#e63946",
+                               "Not significant" = "#8ecae6")) +
+  labs(title = "Significance of Categorical Associations (-log10 P-value)",
+       subtitle = "Red = significant association (p < 0.05)",
+       x = "Variable",
+       y = "-log10(P-value)",
+       fill = "Significance") +
+  theme_minimal(base_size = 12)
+
+
+```
+
+From this result, most of categorical variables show no meaningful link to survival. Gender has no effect, ethnicity is statistically significant but with very weak effect $(V \approx 0.09)$, and tumor subtype shows only a borderline trend. Overall, categorical predictors contribute little to explaining survival differences.
+
+
+# Genex data studies
+## Differential Expression Analysis
+```{r differential_expression}
+# Matrix vital status
+design <- model.matrix(~vital_status, data = clinical_df)
+
+# Fit linear model using limma (empirical Bayes)
+fit <- lmFit(t(GeneX_df), design)
+fit <- eBayes(fit)
+
+# Extract top differentially expressed genes
+top_genes <- topTable(fit
+                      , coef          = 2
+                      , number        = 5000
+                      , adjust.method = "BH")
+
+cat("Top 20 Differentially Expressed Genes (Dead vs Alive):\n")
+print(top_genes[1:20, c("logFC", "AveExpr", "P.Value", "adj.P.Val")])
+
+cat("\n=== DE SUMMARY ===\n")
+cat("Significant genes (FDR < 0.05):", sum(top_genes$adj.P.Val < 0.05), "\n")
+cat("Genes |logFC| > 1:", sum(abs(top_genes$logFC) > 1), "\n")
+cat("Both significant AND |logFC| > 1:"
+    , sum(top_genes$adj.P.Val < 0.05 & abs(top_genes$logFC) > 1), "\n\n")
+
+cat("Expression direction:\n")
+cat("  Upregulated in Dead:", sum(top_genes$logFC > 0), "\n")
+cat("  Downregulated in Dead:", sum(top_genes$logFC < 0), "\n")
+```
+
+## Volcano Plot
+```{r volcano_plot, fig.width=8, fig.height=6}
+plot(top_genes$logFC
+     , -log10(top_genes$P.Value)
+     , pch      = 19
+     , cex      = 0.6
+     , col      = ifelse(top_genes$adj.P.Val < 0.05
+                         , ifelse(abs(top_genes$logFC) > 1, "#d62828", "#e63946")
+                         , "#8ecae6")
+     , xlab     = "Log2 Fold Change (Dead vs Alive)"
+     , ylab     = "-log10(P-value)"
+     , main     = "Volcano Plot: Differentially Expressed Genes"
+     , sub      = "Significance threshold: FDR < 0.05, |logFC| > 1"
+     , col.main = "#023047"
+     , col.lab  = "#023047"
+     , col.sub  = "#666666"
+     , cex.sub  = 0.8
+     , font.sub = 3)
+
+# Significance thresholds 0,05
+abline(h   = -log10(0.05)
+       , col = "#fb8500"
+       , lty = 2
+       , lwd = 2)
+
+abline(v   = c(-1, 1)
+       , col = "#fb8500"
+       , lty = 2
+       , lwd = 2)
+
+# Gene labels
+top_hits <- rownames(top_genes)[1:5]
+for(gene in top_hits) {
+  text(top_genes[gene, "logFC"]
+       , -log10(top_genes[gene, "P.Value"])
+       , labels = gene
+       , pos    = 4
+       , cex    = 0.6
+       , col    = "#023047")
+}
+
+legend("topright"
+       , legend = c("FDR<0.05 & |logFC|>1", "FDR<0.05", "Not sig.")
+       , col    = c("#d62828", "#e63946", "#8ecae6")
+       , pch    = 19
+       , bty    = "n"
+       , cex    = 0.8)
+```
+From the result **top_gene**, most significant genes show **positive logFC**, meaning they are **up-regulated** in patients who died, while like few **CST1, MMP11, SNORD104** are down-regulated. Several genes display both large effect sizes (|logFC| > 1) and very strong statistical significance **(FDR << 0.05)**—notably **APOB, LYVE1, LINC01497, AC104211.1 **making them the clearest potential biomarkers.
+
+The Volcano plot confirms a pronouced asymmetry, with a dense cluster of up-regulated genes in the Dead group, indicating the activated transcriptional programs link to poor diagnosis, where down-regulated genes are fewer and more dispersed.
+
+Overall, the results point to a robust molecular signature differentiating Alive vs Dead patients, with a handful of genes emerging as particularly strong candidates for biological interpretation and predictive modeling.
+
+
+## Gene Expression Characteristics
+```{r gene_characteristics}
+top50_genes <- top_genes[1:50, ]
+
+cat("=== TOP 50 GENE CHARACTERISTICS ===\n\n")
+
+# Expression levels
+cat("Average Expression Levels:\n")
+cat("  Min:", round(min(top50_genes$AveExpr), 2), "\n")
+cat("  Median:", round(median(top50_genes$AveExpr), 2), "\n")
+cat("  Max:", round(max(top50_genes$AveExpr), 2), "\n\n")
+
+# Fold changes
+cat("Fold Change Distribution:\n")
+cat("  Upregulated in Dead (logFC > 0):", sum(top50_genes$logFC > 0), "\n")
+cat("  Downregulated in Dead (logFC < 0):", sum(top50_genes$logFC < 0), "\n\n")
+
+# Statistical significance
+cat("P-value ranges:\n")
+cat("  Min P-value:", format(min(top50_genes$P.Value), scientific = TRUE), "\n")
+cat("  Max P-value:", format(max(top50_genes$P.Value), scientific = TRUE), "\n")
+cat("  Max FDR:", format(max(top50_genes$adj.P.Val), scientific = TRUE), "\n")
+```
+
+## Gene Expression Distributions
+```{r gene_distributions, fig.width=10, fig.height=10}
+# Create gene subset for top 20 genes
+top20_genes <- rownames(top_genes)[1:20]
+gene_subset <- as.data.frame(GeneX_df[, top20_genes])
+colnames(gene_subset) <- top20_genes
+
+par(mfrow = c(3, 3), bg = "white")
+
+for(i in 1:9) {
+  gene      <- top20_genes[i]
+  gene_expr <- gene_subset[, i]
+  
+  # Histogram with separate colors by vital status
+  hist(gene_expr[clinical_df$vital_status == "Alive"]
+       , breaks   = 30
+       , col      = rgb(0.2, 0.6, 0.8, 0.5)
+       , main     = paste(gene, "- Expression Distribution")
+       , sub      = "Alive (blue) vs Dead (red) patients"
+       , xlab     = "Expression Level"
+       , ylab     = "Frequency"
+       , border   = "white"
+       , col.main = "#023047"
+       , col.lab  = "#023047"
+       , col.sub  = "#666666"
+       , cex.sub  = 0.7
+       , font.sub = 3)
+
+  hist(gene_expr[clinical_df$vital_status == "Dead"]
+       , breaks = 30
+       , col    = rgb(0.9, 0.2, 0.3, 0.5)
+       , add    = TRUE
+       , border = "white")
+  
+  legend("topright"
+         , legend = c("Alive", "Dead")
+         , fill   = c(rgb(0.2, 0.6, 0.8, 0.5), rgb(0.9, 0.2, 0.3, 0.5))
+         , bty    = "n")
+  
+  # Test for bimodality (Hartigan's dip test)
+  dip_result <- dip.test(gene_expr)
+  
+  if(dip_result$p.value < 0.05) {
+    cat(sprintf("%s: BIMODAL (p=%.4f) need subgroups!\n"
+                , gene
+                , dip_result$p.value))
+  }
+}
+```
+
+A subset of the strongest DE genes shows bimodal expression patterns, indicating heterogeneity and possible molecular subgroups, while several genes exhibit clear upregulation in non-survivors, reinforcing their biological relevance.
+
+## Bimodal Gene Analysis
+
+```{r, check bimodal for all top 500 genex}
+# Create gene subset for top 500
+top500_genes <- rownames(top_genes)[1:500]
+gene500_subset <- as.data.frame(GeneX_df[, top500_genes])
+colnames(gene500_subset) <- top500_genes
+
+# Run dip test for each of the top 500 genes
+dip_results <- sapply(gene500_subset, function(x) {
+    dip.test(x)$p.value
+})
+
+# Convert to data frame
+bimodality_df <- data.frame(
+    Gene = names(dip_results),
+    Dip_Pvalue = dip_results
+)
+
+bimodality_df$Is_Bimodal <- bimodality_df$Dip_Pvalue < 0.05
+
+# Sort by lowest dip-test pvalue (most strongly bimodal first)
+bimodality_df <- bimodality_df[order(bimodality_df$Dip_Pvalue), ]
+
+# Check only Bimodal 
+bimodal_genes_only <- bimodality_df[bimodality_df$Is_Bimodal == TRUE, ]
+
+cat("\n=== BIMODAL GENES (Dip p < 0.05) ===\n")
+print(bimodal_genes_only)
+
+# Visualize top Bimodal Genex
+top_bimodal_gene <- bimodality_df$Gene[1]
+expr_values <- gene500_subset[[top_bimodal_gene]]
+
+hist(expr_values, breaks = 20,
+     main = paste("Histogram of", top_bimodal_gene),
+     xlab = "Expression")
+
+cat("=== BIMODALITY CHECK SUMMARY (Top 500 Genes) ===\n")
+cat("Total genes tested:", nrow(bimodality_df), "\n")
+cat("Bimodal genes (Dip p < 0.05):", sum(bimodality_df$Is_Bimodal), "\n\n")
+
+cat("Top 10 most bimodal genes:\n")
+print(head(bimodality_df, 10))
+
+```
+
+### Top 10 Bimodal distributions
+```{r ,bimodal_visualization_top10, fig.width=12, fig.height=8}
+par(mfrow = c(2, 3), bg = "white")
+
+# Loop through top 10 most bimodal genes
+for (gene in head(bimodality_df$Gene, 10)) {
+  
+  gene_expr <- gene500_subset[, gene]
+  
+  alive_expr <- gene_expr[clinical_df$vital_status == "Alive"]
+  dead_expr  <- gene_expr[clinical_df$vital_status == "Dead"]
+  
+  # Make sure densities exist (avoids zero-length errors)
+  if (length(alive_expr) > 1 & length(dead_expr) > 1) {
+    
+    plot(density(alive_expr, na.rm = TRUE),
+         col      = "#219ebc",
+         lwd      = 3,
+         main     = paste(gene, "- Expression Distribution"),
+         sub      = "Density plot + Median cutpoint (orange)",
+         xlab     = "Expression Level",
+         ylab     = "Density",
+         col.main = "#023047",
+         col.lab  = "#023047",
+         col.sub  = "#666666",
+         cex.sub  = 0.7,
+         font.sub = 3)
+    
+    lines(density(dead_expr, na.rm = TRUE),
+          col = "#e63946",
+          lwd = 3)
+    
+    # Add median vertical line
+    abline(v = median(gene_expr, na.rm = TRUE),
+           col = "#fb8500",
+           lty = 2,
+           lwd = 2)
+    
+    legend("topright",
+           legend = c("Alive", "Dead", "Median"),
+           col    = c("#219ebc", "#e63946", "#fb8500"),
+           lwd    = c(3, 3, 2),
+           lty    = c(1, 1, 2),
+           bty    = "n",
+           cex    = 0.8)
+  }
+}
+```
+
+
+```{r bimodal_genes_analysis}
+# Identify bimodal genes from paper
+bimodal_genes <- c("APOB", "LINC01497", "AC104211.1", "PSD2", "LINC02511")
+
+cat("Bimodal genes identified:", length(bimodal_genes), "\n")
+cat(paste(bimodal_genes, collapse = ", "), "\n\n")
+
+# For each bimodal gene, create binary groups (high/low expressors)
+cat("Creating binary expression groups for bimodal genes:\n\n")
+
+for(gene in bimodal_genes) {
+  gene_expr   <- gene_subset[, gene]
+  gene_median <- median(gene_expr)
+  
+  # Create binary groups
+  clinical_df[[paste0(gene, "_group")]] <- ifelse(gene_expr > gene_median
+                                                   , "High", "Low")
+  
+  # Test survival difference
+  high_death_rate <- sum(clinical_df[[paste0(gene, "_group")]] == "High" & 
+                          clinical_df$vital_status == "Dead") /
+                     sum(clinical_df[[paste0(gene, "_group")]] == "High")
+  
+  low_death_rate  <- sum(clinical_df[[paste0(gene, "_group")]] == "Low" & 
+                          clinical_df$vital_status == "Dead") /
+                     sum(clinical_df[[paste0(gene, "_group")]] == "Low")
+  
+  cat(sprintf("%s:\n", gene))
+  cat(sprintf("  High expressors: %.1f%% mortality\n", high_death_rate * 100))
+  cat(sprintf("  Low expressors:  %.1f%% mortality\n", low_death_rate * 100))
+  cat(sprintf("  Fold difference: %.2fx\n\n", high_death_rate / low_death_rate))
+}
+```
+
+## Bimodal Gene Distributions 
+
+```{r bimodal_visualization, fig.width=12, fig.height=8}
+par(mfrow = c(2, 3), bg = "white")
+
+for(gene in bimodal_genes) {
+  gene_expr <- gene_subset[, gene]
+  
+  # Density plot
+  alive_expr <- gene_expr[clinical_df$vital_status == "Alive"]
+  dead_expr  <- gene_expr[clinical_df$vital_status == "Dead"]
+  
+  plot(density(alive_expr, na.rm = TRUE)
+       , col      = "#219ebc"
+       , lwd      = 3
+       , main     = paste(gene, "- Bimodal Distribution")
+       , sub      = "Density plot with median cutpoint (orange)"
+       , xlab     = "Expression Level"
+       , ylab     = "Density"
+       , col.main = "#023047"
+       , col.lab  = "#023047"
+       , col.sub  = "#666666"
+       , cex.sub  = 0.7
+       , font.sub = 3)
+  
+  lines(density(dead_expr, na.rm = TRUE)
+        , col = "#e63946"
+        , lwd = 3)
+  
+  # Add vertical line at median (cutpoint)
+  abline(v   = median(gene_expr)
+         , col = "#fb8500"
+         , lty = 2
+         , lwd = 2)
+  
+  legend("topright"
+         , legend = c("Alive", "Dead", "Median")
+         , col    = c("#219ebc", "#e63946", "#fb8500")
+         , lwd    = c(3, 3, 2)
+         , lty    = c(1, 1, 2)
+         , bty    = "n"
+         , cex    = 0.8)
+}
+```
+
+These five genes is likely to present subgroup markers: their expression defined nature of the patient cluster with different survivals risk. They do not act alone as strong predictors, but provide important biological signal which could improve modeling.
+
+
+## Key Cancer Genes Check
+```{r key_cancer_genes}
+key_genes <- c("GATA3", "CDH1", "ESR1", "PGR")
+for(gene in key_genes) {
+  cat("Gene:", gene, "\n")
+  
+  # Expression by vital status
+  alive_expr <- GeneX_df[clinical_df$vital_status == "Alive", gene]
+  dead_expr  <- GeneX_df[clinical_df$vital_status == "Dead", gene]
+  
+  cat("  Alive: mean=", round(mean(alive_expr, na.rm = TRUE), 2)
+      , " sd=", round(sd(alive_expr, na.rm = TRUE), 2), "\n", sep = "")
+  cat("  Dead:  mean=", round(mean(dead_expr, na.rm = TRUE), 2)
+      , " sd=", round(sd(dead_expr, na.rm = TRUE), 2), "\n", sep = "")
+  
+  # T-test
+  test <- t.test(alive_expr, dead_expr)
+  cat("  T-test p-value:", format(test$p.value, scientific = TRUE), "\n")
+  
+  # Check if in top genes
+  if(gene %in% rownames(top_genes)) {
+    idx <- which(rownames(top_genes) == gene)
+    cat("  Rank in DE analysis:", idx, "\n")
+    cat("  logFC:", round(top_genes[gene, "logFC"], 3), "\n")
+    cat("  FDR:", format(top_genes[gene, "adj.P.Val"], scientific = TRUE), "\n")
+  } else {
+    cat("  Not in top 100 DE genes\n")
+  }
+  cat("\n")
+}
+
+# Box plot
+par(mfrow = c(2, 2))
+for(gene in key_genes) {
+  boxplot(GeneX_df[, gene] ~ clinical_df$vital_status
+          , col      = c("#8ecae6", "#e63946")
+          , main     = paste(gene, "- Expression by Vital Status")
+          , sub      = "Key breast cancer marker gene"
+          , xlab     = "Vital Status"
+          , ylab     = "Expression Level"
+          , names    = c("Alive", "Dead")
+          , col.main = "#023047"
+          , col.lab  = "#023047"
+          , col.sub  = "#666666"
+          , cex.sub  = 0.7
+          , font.sub = 3)
+}
+```
+
+Classical breast cancer markers **(GATA3, CDH1, ESR1, PGR)** shows no dfferent expression between Alive and Dead groups (all $p > 0.05$).
+
+## K-Means Clustering
+```{r kmeans_clustering}
+top50_data <- GeneX_df[, rownames(top_genes)[1:50]]
+
+set.seed(42)
+for(k in 2:4) {
+  kmeans_result <- kmeans(scale(top50_data), centers = k, nstart = 25)
+  
+  cat(sprintf("\n--- K=%d CLUSTERS ---\n", k))
+  
+  # Cluster vs survival
+  cluster_table <- table(kmeans_result$cluster, clinical_df$vital_status)
+  print(cluster_table)
+  
+  # Chi-square test
+  chi_test <- chisq.test(cluster_table)
+  cat(sprintf("Chi-square p=%.4e %s\n"
+              , chi_test$p.value
+              , ifelse(chi_test$p.value < 0.05, "*** SIGNIFICANT", "")))
+  
+  # Cluster sizes
+  cat("Cluster sizes:", table(kmeans_result$cluster), "\n")
+}
+
+kmeans_2 <- kmeans(scale(top50_data), centers = 2, nstart = 25)
+clinical_df$cluster <- paste0("C", kmeans_2$cluster)
+print(table(clinical_df$cluster, clinical_df$vital_status))
+```
+
+## PCA Visualization by Clusters
+```{r pca_analysis, fig.width=12, fig.height=6}
+# PCA
+pca_result <- prcomp(top50_data, scale. = TRUE)
+
+# Variance explained
+var_exp <- summary(pca_result)$importance[2, 1:10]
+cat("Variance explained by first 10 PCs:\n")
+print(round(var_exp, 3))
+cat("\nCumulative variance (PC1-10):", round(sum(var_exp), 3), "\n\n")
+
+par(mfrow = c(1, 2), bg = "white")
+
+# Plot 1: Color by cluster
+plot(pca_result$x[, 1]
+     , pca_result$x[, 2]
+     , col      = ifelse(clinical_df$cluster == "C1", "#219ebc", "#fb8500")
+     , pch      = 19
+     , cex      = 0.8
+     , xlab     = paste0("PC1 (", round(var_exp[1] * 100, 1), "%)")
+     , ylab     = paste0("PC2 (", round(var_exp[2] * 100, 1), "%)")
+     , main     = "PCA: K-Means Clusters"
+     , sub      = "Gene expression-based patient clustering"
+     , col.main = "#023047"
+     , col.lab  = "#023047"
+     , col.sub  = "#666666"
+     , cex.sub  = 0.7
+     , font.sub = 3)
+
+legend("topright"
+       , legend = c("Cluster 1", "Cluster 2")
+       , col    = c("#219ebc", "#fb8500")
+       , pch    = 19)
+
+# Plot 2: Color by survival
+plot(pca_result$x[, 1]
+     , pca_result$x[, 2]
+     , col      = ifelse(clinical_df$vital_status == "Dead", "#e63946", "#8ecae6")
+     , pch      = 19
+     , cex      = 0.8
+     , xlab     = paste0("PC1 (", round(var_exp[1] * 100, 1), "%)")
+     , ylab     = paste0("PC2 (", round(var_exp[2] * 100, 1), "%)")
+     , main     = "PCA: Survival Outcome"
+     , sub      = "Patient distribution by vital status"
+     , col.main = "#023047"
+     , col.lab  = "#023047"
+     , col.sub  = "#666666"
+     , cex.sub  = 0.7
+     , font.sub = 3)
+
+legend("topright"
+       , legend = c("Alive", "Dead")
+       , col    = c("#8ecae6", "#e63946")
+       , pch    = 19)
+```
+
+PCA reveals a strong molecular structure in the dataset, **PCA1** (54.7% of variance) clearly separate two expression defined clusters, confirming that the DE genes capture major biological subtypes. However on the right plot, the PCA space does not separate Alive vs Dead patients, indicating that survival differences are not driven by global gene-expression variation.
+
+## Clinical vs Gene Correlations
+```{r clinical_gene_correlation}
+# Numeric clinical variables
+numeric_clinical <- c("age_at_index"
+                      , "initial_weight"
+                      , "days_to_last_follow_up"
+                      , "age_at_diagnosis"
+                      , "days_to_birth")
+
+# For each clinical variable
+for(clin_var in numeric_clinical) {
+  cat("---", clin_var, "---\n")
+  
+  clin_values <- clinical_df[[clin_var]]
+  
+  # Calculate correlations with all 20 genes
+  cors <- numeric(20)
+  for(i in 1:20) {
+    cors[i] <- cor(clin_values, gene_subset[, i], use = "complete.obs")
+  }
+  names(cors) <- top20_genes
+  
+  # Sort and show top 5
+  cors_sorted <- sort(abs(cors), decreasing = TRUE)
+  cat("Top 5 correlated genes:\n")
+  for(i in 1:5) {
+    gene <- names(cors_sorted)[i]
+    cat(sprintf("  %s: r=%.3f\n", gene, cors[gene]))
+  }
+  cat("\n")
+}
+
+```
+
+From this correlation, we can say that, 
+
++ Age-related variables **(age_at_index, age_at_diagnosis, days_to_birth)** show almost identical correlated genes **(VEGFD, LINC01235, LINC02511, ATF3, PSD2)** → expected because these age variables are themselves highly collinear.
+
++ Initial weight shows slightly stronger associations (up to $r = 0.18$), mostly with genes involved in immune/metabolic activity (LYVE1, FHL1, GPX3, VEGFD).
+
++ Follow-up time correlates weakly with stress/response genes **(ATF3, LINC02511)**, but effect sizes remain very small.
+
+## Categorical Clinical vs Genes
+```{r categorical_gene_interaction}
+# Tumor stage vs genes
+cat("1. TUMOR STAGE vs GENES\n")
+stage_simple <- substr(clinical_df$ajcc_pathologic_t, 1, 2)
+stage_simple[!stage_simple %in% c("T1", "T2", "T3", "T4")] <- NA
+
+cat("Stage distribution:\n")
+print(table(stage_simple, useNA = "ifany"))
+cat("\n")
+
+cat("Testing top 5 genes across stages (ANOVA):\n")
+for(i in 1:5) {
+  gene      <- top20_genes[i]
+  gene_expr <- gene_subset[, i]
+  
+  df_test <- data.frame(expr = gene_expr, stage = stage_simple)
+  df_test <- df_test[!is.na(df_test$stage), ]
+  
+  if(length(unique(df_test$stage)) > 1) {
+    aov_result <- aov(expr ~ stage, data = df_test)
+    p_val      <- summary(aov_result)[[1]]$`Pr(>F)`[1]
+    means      <- tapply(df_test$expr, df_test$stage, mean)
+    
+    cat(sprintf("  %s: p=%.4f %s\n"
+                , gene
+                , p_val
+                , ifelse(p_val < 0.05, "*** SIGNIFICANT", "")))
+    cat(sprintf("    T1=%.2f, T2=%.2f, T3=%.2f, T4=%.2f\n"
+                , means["T1"], means["T2"], means["T3"], means["T4"]))
+  }
+}
+cat("\n")
+
+# Treatment vs genes
+cat("2. PRIOR TREATMENT vs GENES\n")
+treat <- clinical_df$prior_treatment
+cat("Treatment distribution:\n")
+print(table(treat, useNA = "ifany"))
+cat("\n")
+
+cat("Testing top 5 genes (t-test: Yes vs No):\n")
+for(i in 1:5) {
+  gene     <- top20_genes[i]
+  expr_yes <- gene_subset[treat == "Yes", i]
+  expr_no  <- gene_subset[treat == "No", i]
+  
+  if(length(expr_yes) > 2 && length(expr_no) > 2) {
+    test <- t.test(expr_yes, expr_no)
+    cat(sprintf("  %s: Yes=%.2f, No=%.2f, p=%.4f %s\n"
+                , gene
+                , mean(expr_yes, na.rm = TRUE)
+                , mean(expr_no, na.rm = TRUE)
+                , test$p.value
+                , ifelse(test$p.value < 0.05, "*** SIGNIFICANT", "")))
+  }
+}
+cat("\n")
+
+# Race vs genes
+cat("3. RACE vs GENES\n")
+race        <- clinical_df$race
+race_binary <- ifelse(race == "white", "White"
+                      , ifelse(race == "black or african american", "Black", NA))
+
+cat("Testing top 5 genes (White vs Black):\n")
+for(i in 1:5) {
+  gene        <- top20_genes[i]
+  expr_white  <- gene_subset[race_binary == "White" & !is.na(race_binary), i]
+  expr_black  <- gene_subset[race_binary == "Black" & !is.na(race_binary), i]
+  
+  if(length(expr_white) > 2 && length(expr_black) > 2) {
+    test <- t.test(expr_white, expr_black)
+    cat(sprintf("  %s: White=%.2f, Black=%.2f, p=%.4f %s\n"
+                , gene
+                , mean(expr_white, na.rm = TRUE)
+                , mean(expr_black, na.rm = TRUE)
+                , test$p.value
+                , ifelse(test$p.value < 0.05, "*** SIGNIFICANT", "")))
+  }
+}
+```
+
+From the result , we can state that 
+
+* **Tumor stage:** Almost no gene is stage-dependent; only **LINC01497** and **AC104211.1** show small differences → weak association.
+* **Prior treatment:** No gene shows expression changes → **no effect**.
+* **Race:** Several genes (**APOB, LYVE1, LINC01497, AC104211.1**) differ between White vs Black patients → likely due to **subtype composition**, not race biology.
+
+Interprete, clinical categorical variables have **minimal influence** on top gene expression patterns, except for race-related subtype differences.
+
+
+## Gene-Gene Correlations
+```{r gene_gene_correlation}
+# Correlation matrix
+gene_cor <- cor(gene_subset)
+
+# Find highly correlated pairs
+high_cor <- which(abs(gene_cor) > 0.7 & gene_cor != 1, arr.ind = TRUE)
+
+if(nrow(high_cor) > 0) {
+  cat("Highly correlated gene pairs (|r| > 0.7):\n")
+  for(i in 1:nrow(high_cor)) {
+    if(high_cor[i, 1] < high_cor[i, 2]) {
+      gene1 <- rownames(gene_cor)[high_cor[i, 1]]
+      gene2 <- colnames(gene_cor)[high_cor[i, 2]]
+      r     <- gene_cor[high_cor[i, 1], high_cor[i, 2]]
+      cat(sprintf("  %s <-> %s: r=%.3f\n", gene1, gene2, r))
+    }
+  }
+} else {
+  cat("No highly correlated pairs (genes are independent)\n")
+}
+
+```
+The top DE genes form one strong co-expression module **(APOB, LYVE1, KLB, GPX3, FHL1, VEGFD, LINC02511)**.
+They show very high correlations $(|r| ~= 0.70–0.80)$, meaning they act as a single biological program.
+
+## Outlier Detection on Top Gen
+```{r outlier_detection}
+top_gene  <- top20_genes[1]
+gene_expr <- gene_subset[, 1]
+
+# Z-scores
+z_scores <- scale(gene_expr)
+outliers <- which(abs(z_scores) > 3)
+
+cat("Top gene:", top_gene, "\n")
+cat("Samples with |z-score| > 3:", length(outliers), "\n")
+
+if(length(outliers) > 0 & length(outliers) < 10) {
+  cat("Outlier samples:\n")
+  print(outliers)
+}
+
+# Boxplot
+boxplot(gene_expr
+        , col      = "#8ecae6"
+        , main     = paste("Outlier Detection:", top_gene)
+        , sub      = "Samples with |z-score| > 3 are outliers"
+        , xlab     = "Gene"
+        , ylab     = "Expression Level"
+        , col.main = "#023047"
+        , col.lab  = "#023047"
+        , col.sub  = "#666666"
+        , cex.sub  = 0.7
+        , font.sub = 3)
+
+cat("\nOnly", length(outliers), "outliers (", 
+    round(length(outliers) / nrow(gene_subset) * 100, 1), "%) - acceptable\n")
+```
+
+The expression profile of LINC01235 shows only 7 extreme observations $(0.6%)$ exceeding the standard $|z| > 3$ threshold.
+This is well within accepted QC limits for large transcriptomic datasets, where up to 1–2% technical or biological outliers are considered normal.
+
+# Methodology
+
+## Data Preparing before fitting model
+
+```{r data_preprocessing, warning=FALSE, message=FALSE}
+# --- 1. Define Predictor Names ---
+clinical_col_num_names <- c("age_at_index"
+                            , "initial_weight"
+                            , "days_to_last_follow_up")
+
+clinical_signi_obj_names <- c("tissue_type"
+                              , "ajcc_pathologic_t"
+                              , "classification_of_tumor"
+                              , "follow_ups_disease_response"
+                              , "prior_treatment"
+                              , "tissue_or_organ_of_origin"
+                              , "ethnicity")
+
+# ALL GENES (5000)
+top_genes_list <- colnames(GeneX_df)
+
+cat("=== SELECTED VARIABLES ===\n")
+cat("Numeric clinical:", length(clinical_col_num_names), "\n")
+cat("Categorical clinical:", length(clinical_signi_obj_names), "\n")
+cat("Genes: ALL", length(top_genes_list), "\n\n")
+
+
+# --- 2. Check Missing Values ---
+cat("=== MISSING VALUES ===\n")
+cat("Numeric:\n")
+print(colSums(is.na(clinical_df[, clinical_col_num_names])))
+cat("\nCategorical:\n")
+print(colSums(is.na(clinical_df[, clinical_signi_obj_names])))
+cat("\n")
+
+
+# --- 3. Impute Numeric Variables (median) ---
+clinical_numeric <- clinical_df[, clinical_col_num_names, drop = FALSE]
+
+for (col in colnames(clinical_numeric)) {
+    n_missing <- sum(is.na(clinical_numeric[[col]]))
+    if (n_missing > 0) {
+        median_val <- median(clinical_numeric[[col]], na.rm = TRUE)
+        clinical_numeric[[col]][is.na(clinical_numeric[[col]])] <- median_val
+        cat(sprintf("Imputed %d in %s (median=%.2f)\n", n_missing, col, median_val))
+    }
+}
+cat("\n")
+
+clinical_numeric <- data.frame(lapply(clinical_numeric, as.numeric))
+rownames(clinical_numeric) <- rownames(clinical_df)
+
+
+# --- 4. Impute Categorical Variables (mode) ---
+clinical_categorical <- clinical_df[, clinical_signi_obj_names, drop = FALSE]
+
+for (col in colnames(clinical_categorical)) {
+    n_missing <- sum(is.na(clinical_categorical[[col]]))
+    if (n_missing > 0) {
+        mode_val <- names(sort(table(clinical_categorical[[col]]), decreasing = TRUE))[1]
+        clinical_categorical[[col]][is.na(clinical_categorical[[col]])] <- mode_val
+        cat(sprintf("Imputed %d in %s (mode=%s)\n", n_missing, col, mode_val))
+    }
+}
+cat("\n")
+
+clinical_categorical <- data.frame(lapply(clinical_categorical, as.factor))
+
+
+# --- 5. One-Hot Encode Categorical ---
+valid_factors <- sapply(clinical_categorical, function(x) {
+    n_levels <- length(levels(droplevels(x)))
+    return(n_levels >= 2)
+})
+
+clinical_categorical_valid <- clinical_categorical[, valid_factors, drop = FALSE]
+
+if (sum(!valid_factors) > 0) {
+    cat("Dropped constant columns:", 
+        paste(names(clinical_categorical)[!valid_factors], collapse=", "), "\n\n")
+}
+
+clinical_ohe <- model.matrix(~ . - 1, data = clinical_categorical_valid)
+clinical_ohe <- as.data.frame(clinical_ohe)
+rownames(clinical_ohe) <- rownames(clinical_df)
+
+cat("One-Hot Encoding: ", ncol(clinical_categorical_valid), "->", ncol(clinical_ohe), "\n\n")
+
+
+# --- 6. Gene Expression Quality Check ---
+cat("=== GENE EXPRESSION QUALITY CHECK ===\n")
+
+gene_data <- GeneX_df[, top_genes_list, drop = FALSE]
+gene_data <- as.data.frame(gene_data)
+
+cat("Missing Values:\n")
+missing_per_gene <- colSums(is.na(gene_data))
+missing_pct <- 100 * missing_per_gene / nrow(gene_data)
+
+cat("  Genes with missing:", sum(missing_per_gene > 0), "/", ncol(gene_data), "\n")
+
+if(sum(missing_per_gene > 0) > 0) {
+    missing_summary <- data.frame(
+        Gene          = names(missing_per_gene)
+        , N_Missing   = missing_per_gene
+        , Pct_Missing = round(missing_pct, 2)
+    )
+    print(head(missing_summary[order(-missing_summary$N_Missing), ], 10))
+}
+cat("\n")
+
+
+# --- 7. Distribution Analysis ---
+cat("Distribution Analysis:\n")
+
+sample_genes <- colnames(gene_data)[1:min(20, ncol(gene_data))]
+distribution_summary <- data.frame(
+    Gene = character()
+    , Mean = numeric()
+    , Median = numeric()
+    , Skewness = numeric()
+    , Impute_Method = character()
+    , stringsAsFactors = FALSE
+)
+
+for(gene in sample_genes) {
+    vals <- gene_data[[gene]][!is.na(gene_data[[gene]])]
+    m <- mean(vals)
+    s <- sd(vals)
+    skew <- mean(((vals - m) / s)^3)
+    
+    distribution_summary <- rbind(distribution_summary
+                                  , data.frame(
+                                      Gene = gene
+                                      , Mean = round(m, 2)
+                                      , Median = round(median(vals), 2)
+                                      , Skewness = round(skew, 3)
+                                      , Impute_Method = ifelse(abs(skew) < 0.5, "Mean", "Median")
+                                  ))
+}
+
+print(distribution_summary)
+cat("\n")
+
+
+# --- 8. Determine Imputation Strategy ---
+cat("Imputation Strategy:\n")
+
+all_skewness <- sapply(1:ncol(gene_data), function(i) {
+    vals <- gene_data[!is.na(gene_data[, i]), i]
+    if(length(vals) < 3) return(0)
+    m <- mean(vals)
+    s <- sd(vals)
+    if(s == 0) return(0)
+    mean(((vals - m) / s)^3)
+})
+
+median_skew <- median(abs(all_skewness), na.rm = TRUE)
+cat("  Median absolute skewness:", round(median_skew, 3), "\n")
+
+impute_strategy <- ifelse(median_skew < 0.5, "mean", "median")
+cat("  Selected method:", toupper(impute_strategy), "\n\n")
+
+
+# --- 9. Apply Gene Imputation ---
+cat("Applying Gene Imputation:\n")
+
+gene_data_imputed <- gene_data
+n_imputed <- 0
+
+for(gene in colnames(gene_data_imputed)) {
+    n_missing <- sum(is.na(gene_data_imputed[[gene]]))
+    if(n_missing > 0) {
+        vals <- gene_data_imputed[[gene]]
+        impute_val <- if(impute_strategy == "median") {
+            median(vals, na.rm = TRUE)
+        } else {
+            mean(vals, na.rm = TRUE)
+        }
+        gene_data_imputed[[gene]][is.na(gene_data_imputed[[gene]])] <- impute_val
+        n_imputed <- n_imputed + n_missing
+    }
+}
+
+cat("  Values imputed:", n_imputed, "\n")
+cat("  Method used:", toupper(impute_strategy), "\n")
+cat("  Remaining NA:", sum(is.na(gene_data_imputed)), "\n\n")
+
+
+# --- 10. Visual Distribution Check ---
+par(mfrow = c(2, 3), mar = c(4, 4, 3, 1))
+
+for(i in 1:min(6, ncol(gene_data))) {
+    vals <- gene_data[[i]][!is.na(gene_data[[i]])]
+    m <- mean(vals)
+    s <- sd(vals)
+    skew <- mean(((vals - m) / s)^3)
+    
+    hist(vals
+         , breaks = 30
+         , col = "#8ecae6"
+         , border = "white"
+         , main = colnames(gene_data)[i]
+         , sub = paste("Skewness:", round(skew, 2))
+         , xlab = "Expression"
+         , ylab = "Frequency"
+         , col.main = "#023047"
+         , col.sub = "#666666")
+    
+    abline(v = m
+           , col = "#e63946"
+           , lwd = 2)
+    
+    abline(v = median(vals)
+           , col = "#fb8500"
+           , lwd = 2
+           , lty = 2)
+    
+    legend("topright"
+           , legend = c("Mean", "Median")
+           , col = c("#e63946", "#fb8500")
+           , lwd = 2
+           , lty = c(1, 2)
+           , cex = 0.6
+           , bty = "n")
+}
+
+par(mfrow = c(1, 1))
+
+gene_data <- gene_data_imputed
+
+cat("Gene Expression Quality Check Complete\n")
+cat("Dimensions:", nrow(gene_data), "x", ncol(gene_data), "\n\n")
+
+
+# --- 11. Standardize ---
+cat("=== STANDARDIZATION ===\n\n")
+
+clinical_numeric_scaled <- as.data.frame(scale(clinical_numeric))
+
+cat("Numeric clinical:\n")
+for (var in colnames(clinical_numeric_scaled)) {
+    cat(sprintf("  %s: mean=%.4f, sd=%.4f\n"
+                , var
+                , mean(clinical_numeric_scaled[[var]])
+                , sd(clinical_numeric_scaled[[var]])))
+}
+cat("\n")
+
+gene_data_scaled <- as.data.frame(scale(gene_data))
+
+cat("Genes (", ncol(gene_data_scaled), "):\n", sep="")
+cat(sprintf("  Mean: %.2e, SD: %.4f\n"
+            , mean(as.matrix(gene_data_scaled))
+            , sd(as.matrix(gene_data_scaled))))
+cat(sprintf("  Range: [%.2f, %.2f]\n\n"
+            , min(gene_data_scaled)
+            , max(gene_data_scaled)))
+
+
+# --- 12. Combine Features ---
+data_predictors <- cbind(clinical_numeric_scaled
+                         , clinical_ohe
+                         , gene_data_scaled)
+
+data_predictors$Y <- ifelse(clinical_df$vital_status == "Dead", 1, 0)
+
+cat("=== FINAL DATASET ===\n")
+cat("Samples:", nrow(data_predictors), "\n")
+cat("Features:", ncol(data_predictors) - 1, "\n")
+cat("  Numeric clinical:", ncol(clinical_numeric_scaled), "\n")
+cat("  Categorical (OHE):", ncol(clinical_ohe), "\n")
+cat("  Genes:", ncol(gene_data_scaled), "\n\n")
+
+table_Y <- table(data_predictors$Y)
+print(table_Y)
+cat(sprintf("  Alive: %d (%.1f%%)\n", table_Y[1], 100 * table_Y[1] / sum(table_Y)))
+cat(sprintf("  Dead: %d (%.1f%%)\n", table_Y[2], 100 * table_Y[2] / sum(table_Y)))
+cat(sprintf("  Imbalance: %.2f:1\n", table_Y[1] / table_Y[2]))
+```
+
+## Train/Test Split
+
+```{r train_test_split, warning=FALSE, message=FALSE}
+# Set seed for reproducibility
+set.seed(42)
+
+# Separate features and target
+X_all <- data_predictors[, -which(names(data_predictors) == "Y")]
+Y_all <- data_predictors$Y
+
+# Create train/test split (80/20)
+train_indices <- sample(1:nrow(data_predictors), size = 0.8 * nrow(data_predictors))
+
+X_train <- as.matrix(X_all[train_indices, ])
+X_test <- as.matrix(X_all[-train_indices, ])
+Y_train <- Y_all[train_indices]
+Y_test <- Y_all[-train_indices]
+
+# Calculate number of clinical features
+n_clinical <- ncol(clinical_numeric_scaled) + ncol(clinical_ohe)
+
+cat("=== TRAIN/TEST SPLIT ===\n")
+cat("Training set:\n")
+cat("  Samples:", nrow(X_train), "\n")
+cat("  Features:", ncol(X_train), "\n")
+cat("  Dead:", sum(Y_train == 1), sprintf("(%.1f%%)\n", 100 * sum(Y_train == 1) / length(Y_train)))
+cat("  Alive:", sum(Y_train == 0), sprintf("(%.1f%%)\n", 100 * sum(Y_train == 0) / length(Y_train)))
+cat("\n")
+
+cat("Test set:\n")
+cat("  Samples:", nrow(X_test), "\n")
+cat("  Features:", ncol(X_test), "\n")
+cat("  Dead:", sum(Y_test == 1), sprintf("(%.1f%%)\n", 100 * sum(Y_test == 1) / length(Y_test)))
+cat("  Alive:", sum(Y_test == 0), sprintf("(%.1f%%)\n", 100 * sum(Y_test == 0) / length(Y_test)))
+cat("\n")
+
+cat("Clinical features:", n_clinical, "\n")
+cat("Genomic features:", ncol(X_train) - n_clinical, "\n")
+```
+
+## Logistic regiression
+
+Logistic regression is used here only on feature sets that are not high-dimensional, because the model becomes unstable when the number of predictors is large. This is due to the form of its loss function, which cannot be minimized reliably when $p >> n$. Recall that logistic regression estimates coefficients by maximizing the log-likelihood:
+
+```{r logistic_model_fit, warning=FALSE, message=FALSE}
+logistic_results <- fit_single_model_across_features(
+    model_type = "logistic"
+    , X_train_all = X_train
+    , X_test_all = X_test
+    , Y_train = Y_train
+    , Y_test = Y_test
+    , n_clinical = n_clinical
+    , top_genes_ranked = top_genes
+    , gene_sets = c(100, 50, 20)
+)
+
+logistic_metrics <- plot_classification_metrics_single(logistic_results
+                                                       , threshold = 0.5
+                                                       , csv_filename = "logistic_classification_metrics.csv")
+```
+Logistic regression shows consistently high specificity but low recall, indicating that it classifies Alive patients reliably but struggles to detect Dead cases. The clinical-only model performs best overall, while adding genomic features does not meaningfully improve recall and often reduces generalization, especially with 100 genes. These metrics reinforce the conclusion that logistic regression cannot effectively exploit high-dimensional gene expression and is best used as a baseline on small feature sets.
+
+
+## Ridge Regression across different feature
+
+Ridge regression stabilizes estimation in the presence of strong correlations between genes, but does not perform variable selection.
+
+By adding an L2 penalty,
+
+$$ 
+\hat{\beta}^{\text{ridge}} = argmin_{\beta} \{ -l(\beta) + \lambda \| \beta\|_{2}^{2} \}
+$$
+the model remains stable even when thousands of genes are included.
+Therefore, Ridge can handle large feature sets, and we apply it on 5000, 1000, 500, 100, 50, and 20 top genes to evaluate its performance at different dimensionalities.
+```{r}
+ridge_results <- fit_single_model_across_features(
+    model_type = "ridge"
+    , X_train_all = X_train
+    , X_test_all = X_test
+    , Y_train = Y_train
+    , Y_test = Y_test
+    , n_clinical = n_clinical
+    , top_genes_ranked = top_genes
+    , gene_sets = c(5000, 1000, 500, 100, 50, 20)
+)
+
+ridge_metrics <- plot_classification_metrics_single(ridge_results
+                                                    , threshold = 0.5
+                                                    , csv_filename = "ridge_classification_metrics.csv")
+```
+Ridge regression shows very high specificity around 1.00 but consistently low recall, meaning it correctly identifies Alive patients but frequently misses Dead cases. For large gene sets (5000 and 1000 genes), Ridge collapses completely (Recall = 0.00, F1 = 0.00), predicting all patients as Alive due to excessive shrinkage. Performance improves for smaller gene sets (TOP20–TOP50), where recall reaches 0.25–0.27 and AUC improves to 0.86–0.88. The clinical-only model performs best overall with AUC = 0.892, but still low recall (0.2167). These results show that Ridge cannot effectively recover sparse signals in high-dimensional genomic data.
+
+## Lasso Regression Across Feature Sets
+The Lasso induces sparsity in the solution by setting many coefficients exactly to zero.
+This is particularly well-suited for genomic data, where only a small subset of genes is expected to carry predictive information.
+
+$$
+\hat{\beta}^{\text{lasso}} = argmin_{\beta}\{ -l(\beta) + \lambda \| \beta \|_{1} \}
+$$
+This makes Lasso suitable for genomic data, where only a small subset of genes is expected to be predictive.
+We apply Lasso to gene sets of increasing size (5000, 1000, 500, 100, 50, 20) to evaluate how sparsity improves stability and interpretability in high dimension.
+```{r}
+lasso_results <- fit_single_model_across_features(
+    model_type = "lasso"
+    , X_train_all = X_train
+    , X_test_all = X_test
+    , Y_train = Y_train
+    , Y_test = Y_test
+    , n_clinical = n_clinical
+    , top_genes_ranked = top_genes
+    , gene_sets = c(5000, 1000, 500, 100, 50, 20)
+)
+
+lasso_metrics <- plot_classification_metrics_single(lasso_results
+                                                    , threshold = 0.5
+                                                    , csv_filename = "lasso_classification_metrics.csv")
+```
+Lasso maintains strong performance across all feature sets by selecting a small number of informative variables. Its precision and specificity remain consistently high, while recall stays moderate and never collapses, unlike Ridge. The clinical-only Lasso model performs best overall, but small and medium gene sets (20–1000 genes) provide stable AUC values around 0.85–0.86. Even with 5000 genes, Lasso still extracts usable signal, although performance decreases. These results confirm that Lasso is well-suited for high-dimensional genomic data and supports the hypothesis that the true survival signal is sparse.
+
+## Adaptive Lasso Comparison Across Feature Sets
+The Adaptive Lasso is introduced by Hui Zou (2006), “The Adaptive Lasso and Its Oracle Properties”.
+This method modifies the standard Lasso by applying individual penalty weights to each coefficient, allowing the model to penalize weak predictors more strongly while preserving important ones.
+
+Mathematically, the Adaptive Lasso solves:
+
+$$
+\hat{\beta}^{AL} = argmin_{\beta} \left\{ -l(\beta) + \lambda \sum_{j=1}^{p}w_{j}|\beta_{j}|\right\}
+$$
+where the weights are defined as:
+
+$$
+w_{j} = \frac{1}{\hat{|\beta}^{initial}|^{\gamma}}, \quad \gamma >0
+$$
+This weighting scheme penalizes weak predictors more heavily and reduces bias on strong predictors, leading to improved variable selection consistency.
+
+Large initial coefficients receive small weight, hence we penalize them less,
+Small coefficients receive large weights, so they are penalized more.
+This produces the key advantage described in Zou (2006):
+
+Adaptive Lasso enjoys the oracle property: it selects the correct sparse model with probability 1 as $n \to +\infty$
+```{r}
+adaptive_lasso_results <- fit_single_model_across_features(
+    model_type = "adaptive"
+    , X_train_all = X_train
+    , X_test_all = X_test
+    , Y_train    = Y_train
+    , Y_test     = Y_test
+    , n_clinical = n_clinical
+    , top_genes_ranked = top_genes
+    , gene_sets = c(5000, 1000, 500, 100, 50, 20)
+)
+
+
+adaptive_lasso_metrics <- plot_classification_metrics_single(adaptive_lasso_results
+                                                             , threshold = 0.5
+                                                             , csv_filename = "adaptive_lasso_classification_metrics.csv")
+```
+Adaptive Lasso performs similarly to standard Lasso, with stable results across all medium-sized gene sets (20–1000 genes). The clinical-only Adaptive Lasso model performs best overall (AUC = 0.883), confirming that most stable signal comes from clinical variables. Compared to Ridge, Adaptive Lasso maintains non-zero recall and robust precision, demonstrating better ability to isolate sparse genomic effects. Performance declines for the full 5000 genes due to excessive noise, but remains far superior to Ridge. These results align with the theoretical advantages described in Zou (2006), where adaptive weighting improves feature selection while preserving sparsity.
+
+## UniLasso Comparison Across Feature Sets
+The uniLasso method is introduced by Chatterjee, Hastie & Tibshirani (2025) as a two-step sparse regression procedure designed for high-dimensional genomic data.
+The key idea is to guide multivariate Lasso using univariate signal, improving stability and reducing the chance of selecting false genes.
+
+The uniLasso procedure works as follows:
+1. Univariate Screening Step
+
+Each gene is first fitted in a simple univariate model (gene -> outcome).
+Its leave-one-out (LOO) predicted values are collected to form a new feature matrix of univariate scores.
+This step identifies genes that individually carry predictive signal and removes very weak candidates.
+
+2. Non-negative Lasso Step
+A Lasso is then applied to these univariate predictions with non-negative coefficients:
+$$
+\hat{\theta} = argmin_{\theta \geq 0} \left\{ -l(\theta) + \lambda\sum_{j=1}^{p} \theta_{j} \right\}
+$$
+
+The final multivariate coefficient for each gene is:
+
+$$
+\tilde{\gamma}_{j} = \hat{\beta}_{j}^{univ}  \hat{\theta}_{j}
+$$
+
+```{r, unilasso_fit_model, warning=FALSE, message=TRUE}
+unilasso_results <- fit_single_model_across_features(
+    model_type = "unilasso"
+    , X_train_all = X_train
+    , X_test_all = X_test
+    , Y_train = Y_train
+    , Y_test = Y_test
+    , n_clinical = n_clinical
+    , top_genes_ranked = top_genes
+    , gene_sets = c(5000, 1000, 500, 100, 50, 20)
+)
+
+unilasso_metrics <- plot_classification_metrics_single(unilasso_results
+                                                       , threshold = 0.5
+                                                       , csv_filename = "unilasso_classification_metrics.csv")
+```
+uniLasso shows extremely stable performance across all genomic feature sets, with Test AUC consistently around 0.83–0.85 and recall values near 0.50 for nearly all models. Precision remains high (0.79–0.81), and specificity stays above 0.97. Unlike Ridge, uniLasso never collapses under high dimensionality; it consistently identifies the same core signal even when starting from 5000 genes. This reflects the intended effect of the uniLasso procedure (Chatterjee, Hastie & Tibshirani, 2025), where univariate guidance stabilizes variable selection and enforces sign consistency. The clinical-only model performs poorly because uniLasso relies on univariate ranking across many features, which is only meaningful in the genomic setting.
+
+## ElasticNet Comparison Across Feature Sets
+Elastic Net combines the strengths of both Ridge (L2) and Lasso (L1) penalties, making it well-suited for datasets with correlated gene groups, which is typical in transcriptomic data.
+Its estimator solves:
+
+$$
+\hat{\beta} = argmin_{\beta}\{ -l(\beta) + \lambda(\alpha\|\beta \|_{1}) + (1-\alpha) \| \beta\|_{2}^{2} \}
+$$
+Where
+
++ $\alpha = 1$ is Lasso
++ $\alpha = 0$ is Ridge
++ $0 < \alpha < 1$ is Elastic Mixed model
+```{r}
+elasticnet_results <- fit_single_model_across_features(
+    model_type = "elasticnet"
+    , X_train_all = X_train
+    , X_test_all = X_test
+    , Y_train = Y_train
+    , Y_test = Y_test
+    , n_clinical = n_clinical
+    , top_genes_ranked = top_genes
+    , gene_sets = c(5000, 1000, 500, 100, 50, 20)
+)
+
+elasticnet_metrics <- plot_classification_metrics_single(elasticnet_results
+                                                         , threshold = 0.5
+                                                         , csv_filename = "elasticnet_classification_metrics.csv")
+```
+Elastic Net achieves consistently strong performance across all medium-sized gene sets, with test AUC values in the 0.86–0.89 range. It improves stability over Lasso when correlated genes are present and avoids the total collapse seen in Ridge when dimensionality is high. Precision is consistently high, while recall remains low but stable, reflecting conservative predictions in an imbalanced dataset. Elastic Net works best for gene subsets between 20 and 1000 genes, where it captures correlated genomic structure without being overwhelmed by noise.
+
+
+## Class Imbalance Handling with SMOTE
+
+Current imbalance ratio: 5.12:1 (Alive:Dead)
+
+Problem observed in baseline models:
+- Ridge: Recall = 0.00-0.27 (missing 73-100% of Dead patients)
+- Models biased toward majority class (Alive)
+- High Specificity (99%) but very low Recall (22%)
+- Clinical_TOP5000: Predicts 0 Dead patients (completely fails)
+
+Why SMOTE:
+- Creates synthetic minority class samples (Dead patients)
+- Balances training data to ~1:1 ratio
+- Forces models to learn Dead patient patterns
+- No data loss (vs downsampling)
+- Prevents overfitting (vs simple upsampling)
+
+Expected improvements:
+- Recall: 0.22 -> 0.50-0.70 (detect more Dead patients)
+- F1-Score: 0.36 -> 0.50+ (better balance)
+- Trade-off: Specificity may drop from 99% to 85-90% (acceptable)
+
+Models selected for SMOTE testing:
+1. Ridge - worst Recall performance, needs urgent fix
+2. Lasso - feature selection sensitive to imbalance
+3. ElasticNet - combination of L1/L2, middle priority
+
+```{r smote_imbalance_check, warning=FALSE, message=FALSE}
+cat("=== CLASS IMBALANCE ANALYSIS ===\n")
+cat("Training set imbalance:\n")
+cat("  Alive:", sum(Y_train == 0), sprintf("(%.1f%%)\n", 100 * sum(Y_train == 0) / length(Y_train)))
+cat("  Dead:", sum(Y_train == 1), sprintf("(%.1f%%)\n", 100 * sum(Y_train == 1) / length(Y_train)))
+cat("  Ratio:", sprintf("%.2f:1\n\n", sum(Y_train == 0) / sum(Y_train == 1)))
+```
+
+```{r smote_data_preparation, warning=FALSE, message=FALSE}
+smote_data <- apply_smote(X_train, Y_train, k = 5)
+```
+### Logistic with SMOTE
+```{r logistic_smote, warning=FALSE, message=FALSE}
+logistic_smote <- fit_single_model_across_features(
+    model_type = "logistic"
+    , X_train_all = smote_data$X_train
+    , X_test_all = X_test
+    , Y_train = smote_data$Y_train
+    , Y_test = Y_test
+    , n_clinical = n_clinical
+    , top_genes_ranked = top_genes
+    , gene_sets = c(100, 50, 20)
+)
+```
+
+```{r ridge_smote_metrics, warning=FALSE, message=FALSE}
+logistic_smote_metrics <- plot_classification_metrics_single(logistic_smote
+                                                             , threshold = 0.5
+                                                             , csv_filename = "logistic_smote_classification_metrics.csv")
+```
+
+### Ridge with SMOTE
+```{r ridge_smote, warning=FALSE, message=FALSE}
+ridge_smote <- fit_single_model_across_features(
+    model_type = "ridge"
+    , X_train_all = smote_data$X_train
+    , X_test_all = X_test
+    , Y_train = smote_data$Y_train
+    , Y_test = Y_test
+    , n_clinical = n_clinical
+    , top_genes_ranked = top_genes
+    , gene_sets = c(5000, 1000, 500, 100, 50, 20)
+)
+```
+
+```{r ridge_smote_metrics_v2, warning=FALSE, message=FALSE}
+ridge_smote_metrics <- plot_classification_metrics_single(ridge_smote
+                                                          , threshold = 0.5
+                                                          , csv_filename = "ridge_smote_classification_metrics.csv")
+```
+
+### Lasso with SMOTE
+```{r lasso_smote, warning=FALSE, message=FALSE}
+lasso_smote <- fit_single_model_across_features(
+    model_type = "lasso"
+    , X_train_all = smote_data$X_train
+    , X_test_all = X_test
+    , Y_train = smote_data$Y_train
+    , Y_test = Y_test
+    , n_clinical = n_clinical
+    , top_genes_ranked = top_genes
+    , gene_sets = c(5000, 1000, 500, 100, 50, 20)
+)
+```
+
+```{r lasso_smote_metrics, warning=FALSE, message=FALSE}
+lasso_smote_metrics <- plot_classification_metrics_single(lasso_smote
+                                                          , threshold = 0.5
+                                                          , csv_filename = "lasso_smote_classification_metrics.csv")
+```
+
+### ElasticNet with SMOTE
+```{r elasticnet_smote, warning=FALSE, message=FALSE}
+elasticnet_smote <- fit_single_model_across_features(
+    model_type = "elasticnet"
+    , X_train_all = smote_data$X_train
+    , X_test_all = X_test
+    , Y_train = smote_data$Y_train
+    , Y_test = Y_test
+    , n_clinical = n_clinical
+    , top_genes_ranked = top_genes
+    , gene_sets = c(5000, 1000, 500, 100, 50, 20)
+)
+```
+
+```{r elasticnet_smote_metrics, warning=FALSE, message=FALSE}
+elasticnet_smote_metrics <- plot_classification_metrics_single(elasticnet_smote
+                                                               , threshold = 0.5
+                                                               , csv_filename = "elasticnet_smote_classification_metrics.csv")
+```
+
+### Adaptive Lasso with SMOTE
+```{r adaptive_lasso_v1, warning=FALSE, message=FALSE}
+adaptive_lasso_smote <- fit_single_model_across_features(
+    model_type = "adaptive"
+    , X_train_all = smote_data$X_train
+    , X_test_all = X_test
+    , Y_train = smote_data$Y_train
+    , Y_test = Y_test
+    , n_clinical = n_clinical
+    , top_genes_ranked = top_genes
+    , gene_sets = c(5000, 1000, 500, 100, 50, 20)
+)
+```
+
+```{r adaptive_lasso_smote_metrics, warning=FALSE, message=FALSE}
+adaptive_lasso_smote_metrics <- plot_classification_metrics_single(adaptive_lasso_smote
+                                                                   , threshold = 0.5
+                                                                   , csv_filename = "adaptive_lasso_smote_classification_metrics.csv")
+```
+
+### UniLasso with SMOTE
+```{r adaptive_lasso, warning=FALSE, message=FALSE}
+unilasso_smote <- fit_single_model_across_features(
+    model_type = "unilasso"
+    , X_train_all = smote_data$X_train
+    , X_test_all = X_test
+    , Y_train = smote_data$Y_train
+    , Y_test = Y_test
+    , n_clinical = n_clinical
+    , top_genes_ranked = top_genes
+    , gene_sets = c(5000, 1000, 500, 100, 50, 20)
+)
+```
+
+```{r adaptive_lasso_smote_metrics_chunk, warning=FALSE, message=FALSE}
+unilasso_smote_metrics <- plot_classification_metrics_single(unilasso_smote
+                                                             , threshold = 0.5
+                                                             , csv_filename = "unilasso_smote_classification_metrics.csv")
+```
+
+### SMOTE Impact Comparison
+
+#### Ridge Comparison
+```{r ridge_comparison, warning=FALSE, message=FALSE}
+cat("\n=== RIDGE: SMOTE vs NO SMOTE COMPARISON ===\n\n")
+
+cat("Before SMOTE (Clinical_Only):\n")
+cat("  Recall:", sprintf("%.3f", ridge_metrics$Recall[1]), "\n")
+cat("  Precision:", sprintf("%.3f", ridge_metrics$Precision[1]), "\n")
+cat("  F1-Score:", sprintf("%.3f", ridge_metrics$F1_Score[1]), "\n")
+cat("  AUC:", sprintf("%.3f", ridge_metrics$AUC[1]), "\n\n")
+
+cat("After SMOTE (Clinical_Only):\n")
+cat("  Recall:", sprintf("%.3f", ridge_smote_metrics$Recall[1]), "\n")
+cat("  Precision:", sprintf("%.3f", ridge_smote_metrics$Precision[1]), "\n")
+cat("  F1-Score:", sprintf("%.3f", ridge_smote_metrics$F1_Score[1]), "\n")
+cat("  AUC:", sprintf("%.3f", ridge_smote_metrics$AUC[1]), "\n\n")
+
+cat("Improvement:\n")
+cat("  Recall:", sprintf("%+.3f", ridge_smote_metrics$Recall[1] - ridge_metrics$Recall[1]), "\n")
+cat("  F1-Score:", sprintf("%+.3f", ridge_smote_metrics$F1_Score[1] - ridge_metrics$F1_Score[1]), "\n")
+
+comparison_ridge <- rbind(
+    data.frame(Method = "No SMOTE", ridge_metrics[1, c("Feature_Set", "Recall", "Precision", "F1_Score", "AUC")]),
+    data.frame(Method = "SMOTE", ridge_smote_metrics[1, c("Feature_Set", "Recall", "Precision", "F1_Score", "AUC")])
+)
+
+comp_ridge_long <- reshape2::melt(comparison_ridge, id.vars = c("Method", "Feature_Set"))
+
+ggplot(comp_ridge_long, aes(x = variable, y = value, fill = Method)) +
+    geom_bar(stat = "identity", position = "dodge", color = "#023047", linewidth = 0.3) +
+    geom_text(aes(label = sprintf("%.2f", value))
+              , position = position_dodge(width = 0.9)
+              , vjust = -0.3
+              , fontface = "bold") +
+    labs(title = "Ridge: Impact of SMOTE on Clinical_Only Model"
+         , subtitle = "Comparison of key metrics"
+         , x = "Metric"
+         , y = "Score") +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5, color = "#023047")
+          , plot.subtitle = element_text(hjust = 0.5, color = "#555555")
+          , legend.position = "bottom") +
+    scale_fill_manual(values = c("No SMOTE" = "#e63946", "SMOTE" = "#219ebc")) +
+    ylim(0, 1.1)
+```
+
+#### Lasso Comparison
+```{r lasso_comparison, warning=FALSE, message=FALSE}
+cat("\n=== LASSO: SMOTE vs NO SMOTE COMPARISON ===\n\n")
+
+cat("Before SMOTE (Clinical_Only):\n")
+cat("  Recall:", sprintf("%.3f", lasso_metrics$Recall[1]), "\n")
+cat("  Precision:", sprintf("%.3f", lasso_metrics$Precision[1]), "\n")
+cat("  F1-Score:", sprintf("%.3f", lasso_metrics$F1_Score[1]), "\n")
+cat("  AUC:", sprintf("%.3f", lasso_metrics$AUC[1]), "\n\n")
+
+cat("After SMOTE (Clinical_Only):\n")
+cat("  Recall:", sprintf("%.3f", lasso_smote_metrics$Recall[1]), "\n")
+cat("  Precision:", sprintf("%.3f", lasso_smote_metrics$Precision[1]), "\n")
+cat("  F1-Score:", sprintf("%.3f", lasso_smote_metrics$F1_Score[1]), "\n")
+cat("  AUC:", sprintf("%.3f", lasso_smote_metrics$AUC[1]), "\n\n")
+
+cat("Improvement:\n")
+cat("  Recall:", sprintf("%+.3f", lasso_smote_metrics$Recall[1] - lasso_metrics$Recall[1]), "\n")
+cat("  F1-Score:", sprintf("%+.3f", lasso_smote_metrics$F1_Score[1] - lasso_metrics$F1_Score[1]), "\n")
+
+comparison_lasso <- rbind(
+    data.frame(Method = "No SMOTE", lasso_metrics[1, c("Feature_Set", "Recall", "Precision", "F1_Score", "AUC")]),
+    data.frame(Method = "SMOTE", lasso_smote_metrics[1, c("Feature_Set", "Recall", "Precision", "F1_Score", "AUC")])
+)
+
+comp_lasso_long <- reshape2::melt(comparison_lasso, id.vars = c("Method", "Feature_Set"))
+
+ggplot(comp_lasso_long, aes(x = variable, y = value, fill = Method)) +
+    geom_bar(stat = "identity", position = "dodge", color = "#023047", linewidth = 0.3) +
+    geom_text(aes(label = sprintf("%.2f", value))
+              , position = position_dodge(width = 0.9)
+              , vjust = -0.3
+              , fontface = "bold") +
+    labs(title = "Lasso: Impact of SMOTE on Clinical_Only Model"
+         , subtitle = "Comparison of key metrics"
+         , x = "Metric"
+         , y = "Score") +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5, color = "#023047")
+          , plot.subtitle = element_text(hjust = 0.5, color = "#555555")
+          , legend.position = "bottom") +
+    scale_fill_manual(values = c("No SMOTE" = "#e63946", "SMOTE" = "#219ebc")) +
+    ylim(0, 1.1)
+```
+
+#### ElasticNet Comparison
+```{r elasticnet_comparison, warning=FALSE, message=FALSE}
+cat("\n=== ELASTICNET: SMOTE vs NO SMOTE COMPARISON ===\n\n")
+
+cat("Before SMOTE (Clinical_Only):\n")
+cat("  Recall:", sprintf("%.3f", elasticnet_metrics$Recall[1]), "\n")
+cat("  Precision:", sprintf("%.3f", elasticnet_metrics$Precision[1]), "\n")
+cat("  F1-Score:", sprintf("%.3f", elasticnet_metrics$F1_Score[1]), "\n")
+cat("  AUC:", sprintf("%.3f", elasticnet_metrics$AUC[1]), "\n\n")
+
+cat("After SMOTE (Clinical_Only):\n")
+cat("  Recall:", sprintf("%.3f", elasticnet_smote_metrics$Recall[1]), "\n")
+cat("  Precision:", sprintf("%.3f", elasticnet_smote_metrics$Precision[1]), "\n")
+cat("  F1-Score:", sprintf("%.3f", elasticnet_smote_metrics$F1_Score[1]), "\n")
+cat("  AUC:", sprintf("%.3f", elasticnet_smote_metrics$AUC[1]), "\n\n")
+
+cat("Improvement:\n")
+cat("  Recall:", sprintf("%+.3f", elasticnet_smote_metrics$Recall[1] - elasticnet_metrics$Recall[1]), "\n")
+cat("  F1-Score:", sprintf("%+.3f", elasticnet_smote_metrics$F1_Score[1] - elasticnet_metrics$F1_Score[1]), "\n")
+
+comparison_elasticnet <- rbind(
+    data.frame(Method = "No SMOTE", elasticnet_metrics[1, c("Feature_Set", "Recall", "Precision", "F1_Score", "AUC")]),
+    data.frame(Method = "SMOTE", elasticnet_smote_metrics[1, c("Feature_Set", "Recall", "Precision", "F1_Score", "AUC")])
+)
+
+comp_elasticnet_long <- reshape2::melt(comparison_elasticnet, id.vars = c("Method", "Feature_Set"))
+
+ggplot(comp_elasticnet_long, aes(x = variable, y = value, fill = Method)) +
+    geom_bar(stat = "identity", position = "dodge", color = "#023047", linewidth = 0.3) +
+    geom_text(aes(label = sprintf("%.2f", value))
+              , position = position_dodge(width = 0.9)
+              , vjust = -0.3
+              , fontface = "bold") +
+    labs(title = "ElasticNet: Impact of SMOTE on Clinical_Only Model"
+         , subtitle = "Comparison of key metrics"
+         , x = "Metric"
+         , y = "Score") +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5, color = "#023047")
+          , plot.subtitle = element_text(hjust = 0.5, color = "#555555")
+          , legend.position = "bottom") +
+    scale_fill_manual(values = c("No SMOTE" = "#e63946", "SMOTE" = "#219ebc")) +
+    ylim(0, 1.1)
+```
+
+
+### Overall SMOTE Impact Across All Models
+```{r overall_smote_comparison, warning=FALSE, message=FALSE}
+# Combine all comparisons for TOP20 genes
+all_comparisons <- rbind(
+    data.frame(Model = "Logistic", Method = "No SMOTE", logistic_metrics[4, c("Recall", "Precision", "F1_Score", "AUC")]),
+    data.frame(Model = "Logistic", Method = "SMOTE", logistic_smote_metrics[4, c("Recall", "Precision", "F1_Score", "AUC")]),
+    data.frame(Model = "Ridge", Method = "No SMOTE", ridge_metrics[7, c("Recall", "Precision", "F1_Score", "AUC")]),
+    data.frame(Model = "Ridge", Method = "SMOTE", ridge_smote_metrics[7, c("Recall", "Precision", "F1_Score", "AUC")]),
+    data.frame(Model = "Lasso", Method = "No SMOTE", lasso_metrics[7, c("Recall", "Precision", "F1_Score", "AUC")]),
+    data.frame(Model = "Lasso", Method = "SMOTE", lasso_smote_metrics[7, c("Recall", "Precision", "F1_Score", "AUC")]),
+    data.frame(Model = "ElasticNet", Method = "No SMOTE", elasticnet_metrics[7, c("Recall", "Precision", "F1_Score", "AUC")]),
+    data.frame(Model = "ElasticNet", Method = "SMOTE", elasticnet_smote_metrics[7, c("Recall", "Precision", "F1_Score", "AUC")]),
+    data.frame(Model = "Adaptive Lasso", Method = "No SMOTE", adaptive_lasso_metrics[7, c("Recall", "Precision", "F1_Score", "AUC")]),
+    data.frame(Model = "Adaptive Lasso", Method = "SMOTE", adaptive_lasso_smote_metrics[7, c("Recall", "Precision", "F1_Score", "AUC")]),
+    data.frame(Model = "UniLasso", Method = "No SMOTE", unilasso_metrics[7, c("Recall", "Precision", "F1_Score", "AUC")]),
+    data.frame(Model = "UniLasso", Method = "SMOTE", unilasso_smote_metrics[7, c("Recall", "Precision", "F1_Score", "AUC")])
+)
+
+all_comp_long <- reshape2::melt(all_comparisons, id.vars = c("Model", "Method"))
+
+# Figure 1: Grouped by Metric
+ggplot(all_comp_long, aes(x = Model, y = value, fill = Method)) +
+    geom_bar(stat = "identity", position = "dodge", color = "#023047", linewidth = 0.3) +
+    geom_text(aes(label = sprintf("%.2f", value))
+              , position = position_dodge(width = 0.9)
+              , vjust = -0.3
+              , size = 2.5
+              , fontface = "bold") +
+    facet_wrap(~ variable, ncol = 4) +
+    labs(title = "SMOTE Impact Across All Models (TOP20 Genes)"
+         , subtitle = "Comparison of key metrics before and after SMOTE using TOP20 genes"
+         , x = "Model"
+         , y = "Score"
+         , fill = "Method") +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5, color = "#023047")
+          , plot.subtitle = element_text(hjust = 0.5, color = "#555555")
+          , axis.text.x = element_text(angle = 45, hjust = 1)
+          , legend.position = "bottom") +
+    scale_fill_manual(values = c("No SMOTE" = "#e63946", "SMOTE" = "#219ebc")) +
+    ylim(0, 1.1)
+
+# Figure 2: Grouped by Model
+ggplot(all_comp_long, aes(x = variable, y = value, fill = Method)) +
+    geom_bar(stat = "identity", position = "dodge", color = "#023047", linewidth = 0.3) +
+    geom_text(aes(label = sprintf("%.2f", value))
+              , position = position_dodge(width = 0.9)
+              , vjust = -0.3
+              , size = 2.5
+              , fontface = "bold") +
+    facet_wrap(~ Model, ncol = 3) +
+    labs(title = "SMOTE Impact by Model Type (TOP20 Genes)"
+         , subtitle = "Before vs After SMOTE for All Models using TOP20 genes"
+         , x = "Metric"
+         , y = "Score"
+         , fill = "Method") +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5, color = "#023047")
+          , plot.subtitle = element_text(hjust = 0.5, color = "#555555")
+          , axis.text.x = element_text(angle = 45, hjust = 1)
+          , legend.position = "bottom") +
+    scale_fill_manual(values = c("No SMOTE" = "#e63946", "SMOTE" = "#219ebc")) +
+    ylim(0, 1.1)
+
+```
+
+### Summary on Smote
+Applying SMOTE completely changed the behavior of all models by correcting the strong class imbalance: recall, F1-score, and AUC all improved substantially.
+Lasso and Elastic Net became the top-performing methods, achieving the best balance between precision and recall, with AUC values consistently around 0.88–0.90 across 20–500 gene sets.
+Elastic Net showed the strongest overall performance, indicating that death-related gene expression signals occur in correlated gene groups.
+Ridge, which previously collapsed in high dimensions, became functional after SMOTE but still performed weaker than L1-based methods.
+Overall, SMOTE + regularized models demonstrate that moderate gene sets (20–500 genes) contain the most predictive information, and sparse models such as Lasso and Elastic Net should be preferred for final model selection.
+
+
+```{r, feature_importance_analysis, warning=FALSE, message=FALSE}
+gene_names <- colnames(GeneX)
+results <- feature_importance(
+    model_obj = unilasso_smote$results[[7]]$model_obj
+    , model_name = "UniLasso + SMOTE + TOP20"
+    , top_n = 20
+    , gene_names = gene_names
+)
+```
+
+# Evaluation
+
+We can draw the evaluation from this study. The conducting study on the breast cancer analysis gives us good insight information about the classification of cancer survival outcomes.
+
+The best stable performance model is **UniLasso + SMOTE** with F1-Score of **0.737**, using Clinical + TOP20 genes as features. The SMOTE resampling method addresses the class imbalance problem (5:1 ratio of Alive:Dead) in the original dataset.
+
+**Model Performance:**
+
+- F1-Score: 0.737 (best balance between precision and recall)
+- Recall: 70.0% (identifies 70% of deaths)
+- Precision: 77.8% (78% of predicted deaths are correct)
+- AUC: 0.893
+
+## Feature Analysis
+
+The model selected 24 features (18 clinical, 6 genomic). However, some clinical categories showed extreme coefficients (OR $> 10^{6}$) due to sparse observations, indicating unreliable estimates from quasi-perfect separation. We focus interpretation on stable predictors with reasonable odds ratios (OR between 0.1 and 100).
+
+### Reliable Clinical Features (8 features)
+
+**Disease Response:**
+
+| Feature | Odds Ratio | Interpretation |
+|---------|------------|----------------|
+| **With Tumor** | 47.54 | Residual tumor after treatment indicates treatment failure; 47x higher death risk -- strongest clinically meaningful predictor |
+
+**Tumor Stage (AJCC Pathologic T):**
+
+The tumor staging follows the American Joint Committee on Cancer (AJCC) TNM system 8th Edition (Cancer Research UK, 2024; American Cancer Society, 2021).
+
+| Feature | Odds Ratio | Definition | Interpretation |
+|---------|------------|------------|----------------|
+| **T4d** | 4.41 | Inflammatory carcinoma -- a rare and aggressive type of breast cancer (Cancer Research UK, 2024) | 4.4x higher death risk |
+| **T4b** | 1.12 | Cancer has spread into the skin with possible swelling (Cancer Research UK, 2024) | 12% higher death risk |
+| **T1b** | 0.42 | Tumor size between 0.5 cm and 1 cm (Cancer Research UK, 2024) | 58% lower death risk (protective -- early detection) |
+
+**Demographics:**
+
+| Feature | Odds Ratio | Interpretation |
+|---------|------------|----------------|
+| **Ethnicity: not hispanic/latino** | 3.20 | 3.2x higher risk; may reflect genetic, socioeconomic, or healthcare access factors |
+| **Age at index** | 1.21 | Each year increase in age raises death risk by 21% |
+
+**Other:**
+
+| Feature | Odds Ratio | Interpretation |
+|---------|------------|----------------|
+| **Days to last follow-up** | 1.27 | Longer follow-up allows more time to observe death events |
+| **Prior treatment: Yes** | 1.04 | 4% higher risk; patients with prior treatment may have recurrent or resistant disease |
+
+### Genomic Features (6 genes)
+
+**Protective Genes (higher expression = lower death risk):**
+
+| Gene | Odds Ratio | Biological Function |
+|------|------------|---------------------|
+| **SNORD104** | 0.76 | Small nucleolar RNA (snoRNA) involved in RNA modification and regulation of cell cycle, proliferation, and apoptosis in tumor cells (Lu et al., 2022). In our breast cancer cohort, higher expression is associated with 24% lower death risk. |
+| **CST1** | 0.81 | Cystatin SN, a cysteine protease inhibitor that interacts with GPX4, a key protein regulating ferroptosis (Wang et al., 2022). Higher expression shows 19% lower death risk. |
+
+**Risk Genes (higher expression = higher death risk):**
+
+| Gene | Odds Ratio | Biological Function |
+|------|------------|---------------------|
+| **AC104211.1** | 1.16 | Long non-coding RNA (lncRNA); regulatory role in gene expression; 16% higher death risk |
+| **LINC01235** | 1.12 | Long intergenic non-coding RNA; emerging evidence links lncRNAs to cancer progression; 12% higher death risk |
+| **ATF3** | 1.11 | Activating Transcription Factor 3, a stress-induced transcription factor that plays vital roles in modulating metabolism, immunity, and oncogenesis (Wang et al., 2020). ATF3 gene copy number is greater than 2 in approximately 80% of breast tumors and its protein level is elevated in approximately 50% of tumors (Yin et al., 2008). 11% higher death risk. |
+| **APOB** | 1.07 | Apolipoprotein B, involved in lipid metabolism. Loss of APOB in hepatocellular carcinoma is associated with poor survival, suggesting potential tumor suppressive activity (Lee et al., 2019). 7% higher death risk. |
+
+## Key Findings
+
+1. **Residual tumor is the strongest reliable predictor** -- patients with tumor remaining after treatment (OR=47.5) have dramatically worse outcomes
+
+2. **Tumor stage matters** -- T4d (inflammatory breast cancer, OR=4.4) increases risk; T1b (small tumor 0.5-1cm, OR=0.42) is protective
+
+3. **Age increases risk** -- each additional year increases death risk by 21%
+
+4. **Genomic markers provide modest but stable contribution** -- all 6 genes show reasonable OR (0.76-1.16)
+
+5. **Non-coding RNAs are emerging biomarkers** -- 3 of 6 genes (SNORD104, AC104211.1, LINC01235) are non-coding RNAs
+
+6. **Sparse clinical categories are unreliable** -- extreme OR values for rare tumor locations should be interpreted with caution
+
+## Conclusion
+
+The UniLasso + SMOTE model effectively classifies breast cancer survival using clinical and genomic features. The most actionable finding is that **residual tumor status** strongly predicts mortality, while **early-stage tumors (T1b)** have significantly better outcomes. Gene expression markers, particularly **ATF3** (stress response) and **CST1** (protease inhibitor), provide biological insight into tumor progression. SMOTE resampling was essential for handling the 5:1 class imbalance.
+
+## References
+
+- American Cancer Society. (2021). Stages of Breast Cancer. https://www.cancer.org/cancer/types/breast-cancer/understanding-a-breast-cancer-diagnosis/stages-of-breast-cancer.html
+- Cancer Research UK. (2024). TNM staging for breast cancer. https://www.cancerresearchuk.org/about-cancer/breast-cancer/stages-grades/tnm-staging
+- Lee, Y. et al. (2019). Clinical significance of APOB inactivation in hepatocellular carcinoma. Experimental and Molecular Medicine, 51, 1-12.
+- Lu, B. et al. (2022). C/D box small nucleolar RNA SNORD104 promotes endometrial cancer by regulating the 2-O-methylation of PARP1. Journal of Translational Medicine, 20, 618.
+- Wang, L. et al. (2022). CST1 inhibits ferroptosis and promotes gastric cancer metastasis by regulating GPX4 protein stability via OTUB1. Oncogene, 41, 5227-5238.
+- Wang, Z. et al. (2020). Master Regulator Activating Transcription Factor 3 (ATF3) in Metabolic Homeostasis and Cancer. Frontiers in Endocrinology, 11, 556.
+- Yin, X. et al. (2008). A potential dichotomous role of ATF3, an adaptive-response gene, in cancer development. Oncogene, 27, 2118-2127.

@@ -1,0 +1,25 @@
+"Feature","Coefficient","Abs_Coef","Type","Odds_Ratio","Direction","Rank"
+"tissue_or_organ_of_originLower.inner.quadrant.of.breast",87.0425358981889,87.0425358981889,"Clinical",6.34005508824631e+37,"Increases Death Risk",1
+"tissue_or_organ_of_originUpper.outer.quadrant.of.breast",55.742260831239,55.742260831239,"Clinical",1.61642771367367e+24,"Increases Death Risk",2
+"tissue_or_organ_of_originSpecified.parts.of.peritoneum",27.2587263885232,27.2587263885232,"Clinical",689151100874.159,"Increases Death Risk",3
+"tissue_or_organ_of_originBrain..NOS",26.0978147453282,26.0978147453282,"Clinical",215842485610.981,"Increases Death Risk",4
+"ajcc_pathologic_tT2b",13.7632494678323,13.7632494678323,"Clinical",949081.038797904,"Increases Death Risk",5
+"follow_ups_disease_responseWT.With.Tumor",3.86149895278459,3.86149895278459,"Clinical",47.5365530400996,"Increases Death Risk",6
+"tissue_or_organ_of_originBone.marrow",3.25282125125641,3.25282125125641,"Clinical",25.8632036812509,"Increases Death Risk",7
+"ajcc_pathologic_tT4d",1.48325970423239,1.48325970423239,"Clinical",4.40728874892688,"Increases Death Risk",8
+"tissue_or_organ_of_originBreast..NOS",-1.47690513216956,1.47690513216956,"Clinical",0.228343288248551,"Decreases Death Risk",9
+"tissue_or_organ_of_originSkin.of.lower.limb.and.hip",-1.24514903474882,1.24514903474882,"Clinical",0.287897998127472,"Decreases Death Risk",10
+"ethnicitynot.hispanic.or.latino",1.16211304669975,1.16211304669975,"Clinical",3.19668088058873,"Increases Death Risk",11
+"ajcc_pathologic_tT1b",-0.875279541750818,0.875279541750818,"Clinical",0.416745505625708,"Decreases Death Risk",12
+"tissue_or_organ_of_originBone..NOS",0.746535886706465,0.746535886706465,"Clinical",2.10967917614399,"Increases Death Risk",13
+"SNORD104",-0.275049676504741,0.275049676504741,"Genomic",0.759534391273991,"Decreases Death Risk",14
+"days_to_last_follow_up",0.241628819339821,0.241628819339821,"Clinical",1.27332147278447,"Increases Death Risk",15
+"tissue_or_organ_of_originLower.limb..NOS",-0.224361232218289,0.224361232218289,"Clinical",0.799026448134788,"Decreases Death Risk",16
+"CST1",-0.210386909604444,0.210386909604444,"Genomic",0.810270683804228,"Decreases Death Risk",17
+"age_at_index",0.187473231805447,0.187473231805447,"Clinical",1.20619796124714,"Increases Death Risk",18
+"AC104211.1",0.150437509087102,0.150437509087102,"Genomic",1.16234266697919,"Increases Death Risk",19
+"ajcc_pathologic_tT4b",0.116527466801269,0.116527466801269,"Clinical",1.12358837142188,"Increases Death Risk",20
+"LINC01235",0.112766802996793,0.112766802996793,"Genomic",1.11937086857803,"Increases Death Risk",21
+"ATF3",0.102405772902328,0.102405772902328,"Genomic",1.10783290911184,"Increases Death Risk",22
+"APOB",0.0700586849806711,0.0700586849806711,"Genomic",1.07257112322296,"Increases Death Risk",23
+"prior_treatmentYes",0.0387713585247638,0.0387713585247638,"Clinical",1.0395327761688,"Increases Death Risk",24
